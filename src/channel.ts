@@ -59,6 +59,9 @@ type LanyingImClient = {
   rosterManage?: {
     readRosterMessage: (rosterId: number, mid?: number | string) => unknown;
   };
+  userManage?: {
+    getUid?: () => unknown;
+  };
 };
 
 const meta = {
@@ -482,13 +485,7 @@ class LanyingSession {
       onMessageStatusChanged: (event: unknown) => logDebug("onMessageStatusChanged event", event),
       onSendingMessageStatusChanged: (event: unknown) => {
         logDebug("onSendingMessageStatusChanged event", event);
-        const evt = event as Record<string, unknown>;
-        const msg = (evt.message ?? {}) as Record<string, unknown>;
-        const sender = pickId(msg.from) || pickId(evt.from);
-        if (sender && sender !== this.selfId) {
-          this.selfId = sender;
-          logDebug("learned selfId from sending status event", { selfId: this.selfId });
-        }
+        this.updateSelfIdFromClient("sending status event");
       },
       onUnreadChange: (event: unknown) => logDebug("onUnreadChange event", event),
       onRosterListUpdate: (event: unknown) => logDebug("onRosterListUpdate event", event),
@@ -658,12 +655,7 @@ class LanyingSession {
         logWarn("inbound message missing target id", { mode, event });
         return;
       }
-
-      // Learn selfId from inbound direct message destination when unknown.
-      if (mode === "direct" && !this.selfId && toId) {
-        this.selfId = toId;
-        logDebug("learned selfId from inbound to field", { selfId: this.selfId });
-      }
+      this.updateSelfIdFromClient("inbound event");
 
       if (senderId && toId && senderId === toId) {
         logDebug("skip loopback message (from === to)", { senderId, toId, targetId });
@@ -815,17 +807,13 @@ class LanyingSession {
         throw new Error("Lanying client not initialized");
       }
       logDebug("attempting login", { username: account.username });
-      const result = await this.client.login({
+      await this.client.login({
         name: account.username,
         password: account.password,
       });
 
-      const resultRecord =
-        result && typeof result === "object" ? (result as Record<string, unknown>) : undefined;
-      this.selfId = pickId(resultRecord?.uid ?? resultRecord?.user_id ?? resultRecord?.username);
       logDebug("login success", {
         username: account.username,
-        selfId: this.selfId || undefined,
       });
 
       const deadline = Date.now() + READY_TIMEOUT_MS;
@@ -833,6 +821,7 @@ class LanyingSession {
         const ready = Boolean(this.client?.isReady?.());
         const loggedIn = Boolean(this.client?.isLogin?.());
         if (loggedIn) {
+          this.updateSelfIdFromClient("login fully ready");
           logDebug("sdk ready", { ready, loggedIn });
           this.resetReconnectState("login_success");
           return;
@@ -851,6 +840,17 @@ class LanyingSession {
       throw err;
     } finally {
       this.loginPromise = null;
+    }
+  }
+
+  private updateSelfIdFromClient(reason: string): void {
+    const uid = pickId(this.client?.userManage?.getUid?.());
+    if (!uid) {
+      return;
+    }
+    if (uid !== this.selfId) {
+      this.selfId = uid;
+      logDebug("updated selfId from store getUid", { reason, selfId: this.selfId });
     }
   }
 
