@@ -48,7 +48,7 @@ openclaw plugins install ./openclaw-channel-lanying
 
 ### 参数说明
 
-- `enabled`: 是否启用插件（默认 `true`）
+- `enabled`: 是否启用插件（可选，默认 `false`）。不设置时不会启用。
 - `appId`: 蓝莺应用 App ID
 - `username`: 登录名
 - `password`: 登录密码
