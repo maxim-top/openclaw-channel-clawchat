@@ -1461,6 +1461,66 @@ export const lanyingPlugin: ChannelPlugin<ResolvedLanyingAccount> = {
     blockStreaming: false,
   },
   reload: { configPrefixes: ["channels.lanying"] },
+  configSchema: {
+    schema: {
+      type: "object",
+      additionalProperties: false,
+      properties: {
+        enabled: { type: "boolean" },
+        appId: { type: "string" },
+        username: { type: "string" },
+        password: { type: "string" },
+        allowManage: { type: "boolean" },
+        dmPolicy: { type: "string", enum: ["open", "pairing"] },
+        allowFrom: {
+          type: "array",
+          items: {
+            oneOf: [{ type: "string" }, { type: "number" }],
+          },
+        },
+        defaultTo: { type: "string" },
+      },
+    },
+    uiHints: {
+      enabled: {
+        label: "Enabled",
+        help: "Enable the Lanying channel.",
+      },
+      appId: {
+        label: "App ID",
+        help: "Lanying application App ID.",
+        placeholder: "xxxxx",
+      },
+      username: {
+        label: "Username",
+        help: "Lanying login username.",
+        placeholder: "your-account",
+      },
+      password: {
+        label: "Password",
+        help: "Lanying login password.",
+        sensitive: true,
+      },
+      allowManage: {
+        label: "Allow Manage",
+        help: "Allow self-loopback config patch messages to modify OpenClaw config.",
+        advanced: true,
+      },
+      dmPolicy: {
+        label: "DM Policy",
+        help: "Direct message access policy.",
+      },
+      allowFrom: {
+        label: "Allow From",
+        help: 'Allowed senders. With dmPolicy="open", an empty list is treated as ["*"].',
+      },
+      defaultTo: {
+        label: "Default Target",
+        help: "Default outbound target when no explicit target is provided.",
+        placeholder: "user:123456",
+      },
+    },
+  },
   config: {
     listAccountIds: () => [LANYING_DEFAULT_ACCOUNT_ID],
     resolveAccount: (cfg) => resolveLanyingAccount(cfg),
