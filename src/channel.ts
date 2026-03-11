@@ -90,6 +90,14 @@ const READY_TIMEOUT_MS = 15_000;
 const READY_POLL_MS = 250;
 const RECONNECT_BASE_DELAY_MS = 2_000;
 const RECONNECT_MAX_DELAY_MS = 30_000;
+const LOG_MASK = "******";
+const SENSITIVE_KEY_RE =
+  /(password|pass|pwd|api[_-]?key|token|secret|authorization|auth|cookie|session|private[_-]?key)/i;
+const SENSITIVE_INLINE_RE =
+  /((?:password|pass|pwd|api[_-]?key|token|secret|authorization|auth|cookie|session|private[_-]?key)\s*[:=]\s*["']?)([^"',\s}]+)(["']?)/gi;
+let consoleRedactionInstalled = false;
+
+installConsoleRedaction();
 
 class NodeXmlHttpRequest {
   readyState = 0;
@@ -208,12 +216,97 @@ function ensureXmlHttpRequestPolyfill(): void {
   logDebug("installed XMLHttpRequest polyfill for lanying sdk");
 }
 
+function maskText(value: string): string {
+  if (!value) {
+    return value;
+  }
+  return LOG_MASK;
+}
+
+function redactString(value: string): string {
+  const parsed = maybeParseJson(value);
+  if (parsed && typeof parsed === "object") {
+    try {
+      return JSON.stringify(redactForLog(parsed));
+    } catch {
+      // Fall back to inline replacement.
+    }
+  }
+  return value.replace(SENSITIVE_INLINE_RE, (_full, prefix: string, _secret: string, suffix: string) => {
+    return `${prefix}${LOG_MASK}${suffix}`;
+  });
+}
+
+function redactForLog(value: unknown, parentKey = "", depth = 0): unknown {
+  if (depth > 8) {
+    return "[redaction-depth-limit]";
+  }
+  if (value === null || value === undefined) {
+    return value;
+  }
+  if (value instanceof Error) {
+    return {
+      name: value.name,
+      message: redactString(String(value.message ?? "")),
+      stack: value.stack ? redactString(value.stack) : undefined,
+    };
+  }
+  if (typeof value === "string") {
+    if (SENSITIVE_KEY_RE.test(parentKey)) {
+      return maskText(value);
+    }
+    return redactString(value);
+  }
+  if (typeof value === "number" || typeof value === "boolean" || typeof value === "bigint") {
+    if (SENSITIVE_KEY_RE.test(parentKey)) {
+      return LOG_MASK;
+    }
+    return value;
+  }
+  if (Array.isArray(value)) {
+    return value.map((item) => redactForLog(item, parentKey, depth + 1));
+  }
+  if (typeof value === "object") {
+    const out: Record<string, unknown> = {};
+    for (const [k, v] of Object.entries(value as Record<string, unknown>)) {
+      if (SENSITIVE_KEY_RE.test(k)) {
+        out[k] = LOG_MASK;
+        continue;
+      }
+      out[k] = redactForLog(v, k, depth + 1);
+    }
+    return out;
+  }
+  return value;
+}
+
+function installConsoleRedaction(): void {
+  if (consoleRedactionInstalled) {
+    return;
+  }
+  consoleRedactionInstalled = true;
+  const methods: Array<"log" | "warn" | "error" | "info" | "debug"> = [
+    "log",
+    "warn",
+    "error",
+    "info",
+    "debug",
+  ];
+  for (const method of methods) {
+    const current = console[method].bind(console);
+    console[method] = ((...args: unknown[]) => {
+      const sanitized = args.map((arg) => redactForLog(arg));
+      current(...sanitized);
+    }) as typeof console[typeof method];
+  }
+}
+
 function logDebug(message: string, data?: unknown): void {
   if (data === undefined) {
     console.log(`[lanying] ${message}`);
     return;
   }
-  console.log(`[lanying] ${message}`, data);
+  console.log(`[lanying] ${message}`, redactForLog(data));
 }
 
 function logWarn(message: string, data?: unknown): void {
@@ -221,7 +314,7 @@ function logWarn(message: string, data?: unknown): void {
     console.warn(`[lanying] ${message}`);
     return;
   }
-  console.warn(`[lanying] ${message}`, data);
+  console.warn(`[lanying] ${message}`, redactForLog(data));
 }
 
 function logError(message: string, err?: unknown): void {
@@ -229,7 +322,7 @@ function logError(message: string, err?: unknown): void {
     console.error(`[lanying] ${message}`);
     return;
   }
-  console.error(`[lanying] ${message}`, err);
+  console.error(`[lanying] ${message}`, redactForLog(err));
 }
 
 function sleep(ms: number): Promise<void> {
