@@ -780,6 +780,8 @@ function resolveLanyingAccount(cfg: OpenClawConfig): ResolvedLanyingAccount {
 class LanyingSession {
   private client: LanyingImClient | null = null;
   private accountKey: string | null = null;
+  private ensureReadyInFlight: Promise<void> | null = null;
+  private shutdownPromise: Promise<void> | null = null;
   private loginPromise: Promise<void> | null = null;
   private reconnectPromise: Promise<void> | null = null;
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
@@ -1198,6 +1200,25 @@ class LanyingSession {
   }
 
   async ensureReady(account: ResolvedLanyingAccount): Promise<void> {
+    if (this.ensureReadyInFlight) {
+      try {
+        await this.ensureReadyInFlight;
+      } catch {
+        // Prior in-flight ensure may fail; continue with current attempt.
+      }
+    }
+    const run = this.ensureReadyOnce(account);
+    this.ensureReadyInFlight = run;
+    try {
+      await run;
+    } finally {
+      if (this.ensureReadyInFlight === run) {
+        this.ensureReadyInFlight = null;
+      }
+    }
+  }
+
+  private async ensureReadyOnce(account: ResolvedLanyingAccount): Promise<void> {
     if (!account.configured) {
       throw new Error("Lanying account is not configured (enabled/appId/username/password).");
     }
@@ -1372,37 +1393,53 @@ class LanyingSession {
   }
 
   async shutdown(): Promise<void> {
-    if (this.shuttingDown) {
+    if (this.shutdownPromise) {
+      await this.shutdownPromise;
       return;
     }
-    this.shuttingDown = true;
-    if (this.reconnectTimer) {
-      clearTimeout(this.reconnectTimer);
-      this.reconnectTimer = null;
-    }
-    this.reconnectPromise = null;
-    this.reconnectAttempts = 0;
-    if (!this.client) {
-      return;
-    }
-    logDebug("shutting down lanying session");
-    await this.sendOfflineMarkerToSelf();
+    const run = (async () => {
+      this.shuttingDown = true;
+      if (this.reconnectTimer) {
+        clearTimeout(this.reconnectTimer);
+        this.reconnectTimer = null;
+      }
+      this.reconnectPromise = null;
+      this.reconnectAttempts = 0;
+      if (!this.client) {
+        return;
+      }
+      const client = this.client;
+      logDebug("shutting down lanying session");
+      await this.sendOfflineMarkerToSelf();
+      try {
+        client.disConnect?.();
+      } catch (err) {
+        logWarn("disConnect failed during shutdown", err);
+      }
+      try {
+        client.logout?.();
+      } catch (err) {
+        logWarn("logout failed during shutdown", err);
+      }
+      if (this.client === client) {
+        this.client = null;
+        this.accountKey = null;
+      }
+      this.ensureReadyInFlight = null;
+      this.listenersBound = false;
+      this.loginPromise = null;
+      this.selfId = "";
+      this.onlineMarkerSent = false;
+    })();
+    this.shutdownPromise = run;
     try {
-      this.client.disConnect?.();
-    } catch (err) {
-      logWarn("disConnect failed during shutdown", err);
+      await run;
+    } finally {
+      if (this.shutdownPromise === run) {
+        this.shutdownPromise = null;
+      }
+      this.shuttingDown = false;
     }
-    try {
-      this.client.logout?.();
-    } catch (err) {
-      logWarn("logout failed during shutdown", err);
-    }
-    this.client = null;
-    this.accountKey = null;
-    this.listenersBound = false;
-    this.loginPromise = null;
-    this.selfId = "";
-    this.onlineMarkerSent = false;
   }
 }
 
