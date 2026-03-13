@@ -1435,11 +1435,27 @@ class LanyingSession {
         if (!this.client?.isLogin?.()) {
           return;
         }
+        const runtime = getLanyingRuntime();
+        const cfg = (await runtime.config.loadConfig()) as OpenClawConfig & {
+          models?: {
+            providers?: Record<string, unknown>;
+          };
+        };
+        const providerInited = Boolean(
+          cfg.models?.providers?.lanying &&
+            typeof cfg.models.providers.lanying === "object" &&
+            !Array.isArray(cfg.models.providers.lanying),
+        );
         await this.client.sysManage.sendRosterMessage({
           type: "text",
           uid: this.selfId,
           content: "蓝莺插件已上线",
-          ext: JSON.stringify({ openclaw: { type: "online" } }),
+          ext: JSON.stringify({
+            openclaw: {
+              type: "online",
+              provider_inited: providerInited,
+            },
+          }),
         });
         this.onlineMarkerSent = true;
         this.offlineMarkerSent = false;
