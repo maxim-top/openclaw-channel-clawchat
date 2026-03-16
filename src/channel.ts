@@ -821,6 +821,7 @@ class LanyingSession {
   private reconnectForceRecreate = false;
   private listenersBound = false;
   private shuttingDown = false;
+  private loginSuccessSeen = false;
   private selfId = "";
   private lastConfig?: ResolvedLanyingAccount;
   private onlineMarkerSent = false;
@@ -997,8 +998,15 @@ class LanyingSession {
       onRosterListUpdate: (event: unknown) => logDebug("onRosterListUpdate event", event),
       onGroupListUpdate: (event: unknown) => logDebug("onGroupListUpdate event", event),
       onGroupMemberChanged: (event: unknown) => logDebug("onGroupMemberChanged event", event),
-      loginSuccess: (event: unknown) => logDebug("loginSuccess event", event),
+      loginSuccess: (event: unknown) => {
+        this.loginSuccessSeen = true;
+        this.updateSelfIdFromClient("loginSuccess event");
+        void this.sendLoginMarkerToSelf();
+        logDebug("loginSuccess event", event);
+      },
+      loginMessage: (event: unknown) => logDebug("loginMessage event", event),
       loginFail: (event: unknown) => {
+        this.loginSuccessSeen = false;
         logWarn("loginFail event", event);
         this.updateRuntimeStatus({
           running: true,
@@ -1407,6 +1415,7 @@ class LanyingSession {
       this.client = await this.createClient(account);
       this.onlineMarkerSent = false;
       this.offlineMarkerSent = false;
+      this.loginSuccessSeen = false;
       this.accountKey = nextKey;
       this.lastConfig = account;
       this.bindListeners(account);
@@ -1429,6 +1438,7 @@ class LanyingSession {
       if (!this.client) {
         throw new Error("Lanying client not initialized");
       }
+      this.loginSuccessSeen = false;
       logDebug("attempting login", { username: account.username });
       await this.client.login({
         name: account.username,
@@ -1452,7 +1462,6 @@ class LanyingSession {
         const loggedIn = Boolean(this.client?.isLogin?.());
         if (loggedIn) {
           this.updateSelfIdFromClient("login fully ready");
-          await this.sendLoginMarkerToSelf();
           logDebug("sdk ready", { ready, loggedIn });
           this.resetReconnectState("login_success");
           return;
@@ -1497,49 +1506,45 @@ class LanyingSession {
     if (!this.client || !this.selfId || this.onlineMarkerSent) {
       return;
     }
-    const maxAttempts = 3;
-    for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
-      try {
-        if (!this.client?.isLogin?.()) {
-          return;
-        }
-        const runtime = getLanyingRuntime();
-        const cfg = (await runtime.config.loadConfig()) as OpenClawConfig & {
-          models?: {
-            providers?: Record<string, unknown>;
-          };
-        };
-        const providerInited = Boolean(
-          cfg.models?.providers?.lanying &&
-            typeof cfg.models.providers.lanying === "object" &&
-            !Array.isArray(cfg.models.providers.lanying),
-        );
-        await this.client.sysManage.sendRosterMessage({
-          type: "text",
-          uid: this.selfId,
-          content: "蓝莺插件已上线",
-          ext: JSON.stringify({
-            openclaw: {
-              type: "online",
-              provider_inited: providerInited,
-            },
-          }),
-        });
-        this.onlineMarkerSent = true;
-        this.offlineMarkerSent = false;
-        logDebug("sent login marker message to self", { selfId: this.selfId, attempt });
+    const client = this.client;
+    const selfId = this.selfId;
+    try {
+      if (this.client !== client) {
         return;
-      } catch (err) {
-        if (attempt >= maxAttempts) {
-          logWarn("failed to send login marker message to self", {
-            err,
-            selfId: this.selfId,
-            attempt,
-          });
-          return;
-        }
-        await sleep(250 * attempt);
       }
+      if (!client?.isLogin?.()) {
+        return;
+      }
+      const runtime = getLanyingRuntime();
+      const cfg = (await runtime.config.loadConfig()) as OpenClawConfig & {
+        models?: {
+          providers?: Record<string, unknown>;
+        };
+      };
+      const providerInited = Boolean(
+        cfg.models?.providers?.lanying &&
+          typeof cfg.models.providers.lanying === "object" &&
+          !Array.isArray(cfg.models.providers.lanying),
+      );
+      await client.sysManage.sendRosterMessage({
+        type: "text",
+        uid: selfId,
+        content: "蓝莺插件已上线",
+        ext: JSON.stringify({
+          openclaw: {
+            type: "online",
+            provider_inited: providerInited,
+          },
+        }),
+      });
+      this.onlineMarkerSent = true;
+      this.offlineMarkerSent = false;
+      logDebug("sent login marker message to self", { selfId });
+    } catch (err) {
+      logWarn("failed to send login marker message to self", {
+        err,
+        selfId,
+      });
     }
   }
 
@@ -1641,6 +1646,7 @@ class LanyingSession {
       this.ensureReadyInFlight = null;
       this.listenersBound = false;
       this.loginPromise = null;
+      this.loginSuccessSeen = false;
       this.selfId = "";
       this.onlineMarkerSent = false;
       this.updateRuntimeStatus({
