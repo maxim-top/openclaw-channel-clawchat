@@ -6,11 +6,6 @@ import { fileURLToPath } from "node:url";
 import { createHash } from "node:crypto";
 import { execFile as execFileCb } from "node:child_process";
 import { promisify } from "node:util";
-import {
-  formatPairingApproveHint,
-  type ChannelPlugin,
-  type OpenClawConfig,
-} from "openclaw/plugin-sdk";
 import { getLanyingRuntime } from "./runtime.js";
 import {
   LANYING_CHANNEL_ID,
@@ -20,6 +15,8 @@ import {
   type LanyingMessageTarget,
   type ResolvedLanyingAccount,
 } from "./types.js";
+
+type OpenClawConfig = Record<string, any>;
 
 type FlooFactory = (options: Record<string, unknown>) => LanyingImClient;
 
@@ -344,6 +341,10 @@ function logError(message: string, err?: unknown): void {
 
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function formatPairingApproveHint(channel: string): string {
+  return `/pair approve ${channel} <code>`;
 }
 
 function loadFlooFactory(): FlooFactory {
@@ -1670,7 +1671,7 @@ class LanyingSession {
 
 const session = new LanyingSession();
 
-export const lanyingPlugin: ChannelPlugin<ResolvedLanyingAccount> = {
+export const lanyingPlugin: any = {
   id: LANYING_CHANNEL_ID,
   meta,
   capabilities: {
@@ -1743,25 +1744,25 @@ export const lanyingPlugin: ChannelPlugin<ResolvedLanyingAccount> = {
   },
   config: {
     listAccountIds: () => [LANYING_DEFAULT_ACCOUNT_ID],
-    resolveAccount: (cfg) => resolveLanyingAccount(cfg),
+    resolveAccount: (cfg: any) => resolveLanyingAccount(cfg),
     defaultAccountId: () => LANYING_DEFAULT_ACCOUNT_ID,
-    isConfigured: (account) => account.configured,
-    describeAccount: (account) => ({
+    isConfigured: (account: any) => account.configured,
+    describeAccount: (account: any) => ({
       accountId: account.accountId,
       enabled: account.enabled,
       configured: account.configured,
       allowManage: account.allowManage,
       dmPolicy: account.dmPolicy,
     }),
-    resolveAllowFrom: ({ cfg }) => resolveLanyingAccount(cfg).allowFrom,
-    formatAllowFrom: ({ allowFrom }) =>
-      allowFrom.map((entry) => String(entry).trim()).filter(Boolean),
-    resolveDefaultTo: ({ cfg }) => resolveLanyingAccount(cfg).defaultTo,
+    resolveAllowFrom: ({ cfg }: any) => resolveLanyingAccount(cfg).allowFrom,
+    formatAllowFrom: ({ allowFrom }: any) =>
+      allowFrom.map((entry: any) => String(entry).trim()).filter(Boolean),
+    resolveDefaultTo: ({ cfg }: any) => resolveLanyingAccount(cfg).defaultTo,
   },
   pairing: {
     idLabel: "lanyingUserId",
-    normalizeAllowEntry: (entry) => entry.replace(/^lanying:/i, "").trim(),
-    notifyApproval: async ({ cfg, id }) => {
+    normalizeAllowEntry: (entry: any) => entry.replace(/^lanying:/i, "").trim(),
+    notifyApproval: async ({ cfg, id }: any) => {
       const account = resolveLanyingAccount(cfg);
       if (!account.configured || !account.enabled) {
         return;
@@ -1774,15 +1775,15 @@ export const lanyingPlugin: ChannelPlugin<ResolvedLanyingAccount> = {
     },
   },
   security: {
-    resolveDmPolicy: ({ account }) => ({
+    resolveDmPolicy: ({ account }: any) => ({
       policy: account.dmPolicy ?? "pairing",
       allowFrom: account.allowFrom ?? [],
       policyPath: "channels.lanying.dmPolicy",
       allowFromPath: "channels.lanying.allowFrom",
       approveHint: formatPairingApproveHint("lanying"),
-      normalizeEntry: (raw) => raw.replace(/^lanying:/i, "").trim(),
+      normalizeEntry: (raw: any) => raw.replace(/^lanying:/i, "").trim(),
     }),
-    collectWarnings: ({ account }) => {
+    collectWarnings: ({ account }: any) => {
       if (account.enabled && !account.configured) {
         return [
           '- Lanying is enabled but not configured. Set channels.lanying.appId, channels.lanying.username, channels.lanying.password.',
@@ -1792,9 +1793,9 @@ export const lanyingPlugin: ChannelPlugin<ResolvedLanyingAccount> = {
     },
   },
   messaging: {
-    normalizeTarget: (raw) => normalizeTarget(raw)?.id,
+    normalizeTarget: (raw: any) => normalizeTarget(raw)?.id,
     targetResolver: {
-      looksLikeId: (raw) => {
+      looksLikeId: (raw: any) => {
         const normalized = normalizeTarget(raw);
         return Boolean(normalized?.id);
       },
@@ -1804,7 +1805,7 @@ export const lanyingPlugin: ChannelPlugin<ResolvedLanyingAccount> = {
   outbound: {
     deliveryMode: "direct",
     textChunkLimit: 2000,
-    sendText: async ({ cfg, to, text }) => {
+    sendText: async ({ cfg, to, text }: any) => {
       const account = resolveLanyingAccount(cfg);
       logDebug("outbound sendText requested", {
         to,
@@ -1826,7 +1827,7 @@ export const lanyingPlugin: ChannelPlugin<ResolvedLanyingAccount> = {
     },
   },
   auth: {
-    login: async ({ cfg }) => {
+    login: async ({ cfg }: any) => {
       const account = resolveLanyingAccount(cfg);
       logDebug("auth.login called", { account: sanitizeAccountForLog(account) });
       if (!account.enabled) {
@@ -1836,7 +1837,7 @@ export const lanyingPlugin: ChannelPlugin<ResolvedLanyingAccount> = {
     },
   },
   gateway: {
-    startAccount: async (ctx) => {
+    startAccount: async (ctx: any) => {
       const account = resolveLanyingAccount(ctx.cfg);
       if (!account.enabled) {
         ctx.log?.info?.("[lanying] account disabled, skip startup");
@@ -1898,7 +1899,7 @@ export const lanyingPlugin: ChannelPlugin<ResolvedLanyingAccount> = {
         );
       });
     },
-    stopAccount: async (ctx) => {
+    stopAccount: async (ctx: any) => {
       ctx.log?.info?.("[lanying] stopAccount called");
       session.clearRuntimeStatus(ctx.accountId);
       await session.shutdown();
