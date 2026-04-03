@@ -1,5 +1,5 @@
-import { lanyingPlugin } from "./src/channel.js";
-import { setLanyingRuntime } from "./src/runtime.js";
+import { clawchatPlugin } from "./src/channel.js";
+import { setClawchatRuntime } from "./src/runtime.js";
 
 type OpenClawPluginApi = {
   runtime: unknown;
@@ -7,17 +7,17 @@ type OpenClawPluginApi = {
 };
 
 const plugin = {
-  id: "lanying",
-  name: "Lanying",
-  description: "Lanying IM channel plugin for OpenClaw",
+  id: "clawchat",
+  name: "ClawChat",
+  description: "ClawChat IM channel plugin for OpenClaw",
   configSchema: {
     type: "object",
     additionalProperties: false,
     properties: {},
   },
   register(api: OpenClawPluginApi) {
-    setLanyingRuntime(api.runtime);
-    api.registerChannel({ plugin: lanyingPlugin });
+    setClawchatRuntime(api.runtime);
+    api.registerChannel({ plugin: clawchatPlugin });
   },
 };
 

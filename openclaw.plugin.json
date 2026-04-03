@@ -1,6 +1,6 @@
 {
-  "id": "lanying",
-  "channels": ["lanying"],
+  "id": "clawchat",
+  "channels": ["clawchat"],
   "configSchema": {
     "type": "object",
     "additionalProperties": false,

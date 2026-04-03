@@ -1,8 +1,8 @@
 {
-  "name": "@lanyingim/lanying",
-  "version": "1.0.17",
+  "name": "@lanying/clawchat",
+  "version": "1.0.18",
   "private": false,
-  "description": "OpenClaw Lanying IM channel plugin",
+  "description": "OpenClaw ClawChat IM channel plugin",
   "type": "module",
   "devDependencies": {
     "openclaw": "latest"

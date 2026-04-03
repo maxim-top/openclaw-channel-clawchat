@@ -1,6 +1,6 @@
-# OpenClaw Channel Plugin: Lanying
+# OpenClaw Channel Plugin: ClawChat
 
-Lanying IM Channel for OpenClaw.
+ClawChat IM Channel for OpenClaw.
 
 ## 功能说明
 
@@ -16,24 +16,24 @@ Lanying IM Channel for OpenClaw.
 从 npm 安装（推荐）：
 
 ```bash
-openclaw plugins install @lanyingim/lanying
+openclaw plugins install @lanying/clawchat
 ```
 
 从 GitHub 安装：
 
 ```bash
-git clone https://github.com/maxim-top/openclaw-channel-lanying
-openclaw plugins install ./openclaw-channel-lanying
+git clone https://github.com/maxim-top/openclaw-channel-clawchat
+openclaw plugins install ./openclaw-channel-clawchat
 ```
 
 ## 配置
 
-在 OpenClaw 配置中添加 `channels.lanying`：
+在 OpenClaw 配置中添加 `channels.clawchat`：
 
 ```json
 {
   "channels": {
-    "lanying": {
+    "clawchat": {
       "enabled": true,
       "appId": "xxxxx",
       "username": "xxxx",
@@ -73,6 +73,12 @@ openclaw plugins install ./openclaw-channel-lanying
   - `enabled`: 是否启用该群（默认启用）
   - `requireMention`: 是否要求 @ 触发（默认 `true`）
   - `allowFrom`: 该群发送者白名单（优先级高于 `groupAllowFrom`）
+
+兼容迁移说明：
+
+- 当前版本优先使用 `channels.clawchat`
+- 仍兼容旧配置 `channels.lanying`
+- 仍兼容旧前缀 `lanying:`，但建议尽快迁移到 `clawchat:`
 
 当 `allowManage=true` 时，若收到 `from` 和 `to` 都等于当前 `selfId` 的消息，且 `ext` 为：
 
@@ -150,7 +156,7 @@ openclaw gateway call config.patch --params '{"raw":"PATCH STRING","baseHash":"x
 
 ## 日志与排查
 
-插件日志前缀为 `[lanying]`，常见关键日志：
+插件日志前缀为 `[clawchat]`，常见关键日志：
 
 - `attempting login`
 - `login success`
@@ -193,4 +199,5 @@ openclaw gateway call config.patch --params '{"raw":"PATCH STRING","baseHash":"x
 - `user:<uid>`
 - `group:<gid>`
 - 直接写 `<uid>`（按单聊处理）
-- 可带前缀 `lanying:`，例如 `lanying:user:123456`
+- 可带前缀 `clawchat:`，例如 `clawchat:user:123456`
+- 兼容旧前缀 `lanying:`，例如 `lanying:user:123456`

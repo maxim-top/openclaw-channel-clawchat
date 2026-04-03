@@ -1,15 +1,16 @@
-export const LANYING_CHANNEL_ID = "lanying";
-export const LANYING_DEFAULT_ACCOUNT_ID = "default";
+export const CLAWCHAT_CHANNEL_ID = "clawchat";
+export const CLAWCHAT_LEGACY_CHANNEL_ID = "lanying";
+export const CLAWCHAT_DEFAULT_ACCOUNT_ID = "default";
 
-export type LanyingGroupPolicy = "open" | "disabled" | "allowlist";
+export type ClawchatGroupPolicy = "open" | "disabled" | "allowlist";
 
-export type LanyingGroupConfig = {
+export type ClawchatGroupConfig = {
   requireMention?: boolean;
   enabled?: boolean;
   allowFrom?: Array<string | number>;
 };
 
-export type LanyingChannelConfig = {
+export type ClawchatChannelConfig = {
   enabled?: boolean;
   enable?: boolean;
   appId?: string;
@@ -19,23 +20,25 @@ export type LanyingChannelConfig = {
   allowManage?: boolean;
   dmPolicy?: string;
   allowFrom?: Array<string | number>;
-  groupPolicy?: LanyingGroupPolicy;
+  groupPolicy?: ClawchatGroupPolicy;
   groupAllowFrom?: Array<string | number>;
-  groups?: Record<string, LanyingGroupConfig | undefined>;
+  groups?: Record<string, ClawchatGroupConfig | undefined>;
   defaultTo?: string;
 };
 
-export type ResolvedLanyingAccount = {
+export type ResolvedClawchatAccount = {
   accountId: string;
   enabled: boolean;
   configured: boolean;
+  configKey: string;
+  usesLegacyConfig: boolean;
   appId: string;
   username: string;
   password: string;
   allowManage: boolean;
   dmPolicy: string;
   allowFrom: string[];
-  groupPolicy: LanyingGroupPolicy;
+  groupPolicy: ClawchatGroupPolicy;
   groupAllowFrom: string[];
   groups: Record<
     string,
@@ -48,12 +51,12 @@ export type ResolvedLanyingAccount = {
   defaultTo?: string;
 };
 
-export type LanyingMessageTarget = {
+export type ClawchatMessageTarget = {
   kind: "user" | "group";
   id: string;
 };
 
-export type LanyingInboundEvent = {
+export type ClawchatInboundEvent = {
   from?: { uid?: string | number; id?: string | number } | string | number;
   to?: { uid?: string | number; id?: string | number } | string | number;
   gid?: string | number;

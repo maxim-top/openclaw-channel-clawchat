@@ -2,13 +2,13 @@ export type PluginRuntime = any;
 
 let runtime: PluginRuntime | null = null;
 
-export function setLanyingRuntime(next: PluginRuntime) {
+export function setClawchatRuntime(next: PluginRuntime) {
   runtime = next;
 }
 
-export function getLanyingRuntime(): PluginRuntime {
+export function getClawchatRuntime(): PluginRuntime {
   if (!runtime) {
-    throw new Error("Lanying runtime not initialized");
+    throw new Error("ClawChat runtime not initialized");
   }
   return runtime;
 }

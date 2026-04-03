@@ -4,21 +4,22 @@ import path from "node:path";
 import { createRequire } from "node:module";
 import { fileURLToPath } from "node:url";
 import { createHash } from "node:crypto";
-import { getLanyingRuntime } from "./runtime.js";
+import { getClawchatRuntime } from "./runtime.js";
 import {
-  LANYING_CHANNEL_ID,
-  LANYING_DEFAULT_ACCOUNT_ID,
-  type LanyingChannelConfig,
-  type LanyingInboundEvent,
-  type LanyingMessageTarget,
-  type ResolvedLanyingAccount,
+  CLAWCHAT_CHANNEL_ID,
+  CLAWCHAT_DEFAULT_ACCOUNT_ID,
+  CLAWCHAT_LEGACY_CHANNEL_ID,
+  type ClawchatChannelConfig,
+  type ClawchatInboundEvent,
+  type ClawchatMessageTarget,
+  type ResolvedClawchatAccount,
 } from "./types.js";
 
 type OpenClawConfig = Record<string, any>;
 
-type FlooFactory = (options: Record<string, unknown>) => LanyingImClient;
+type FlooFactory = (options: Record<string, unknown>) => ClawchatImClient;
 
-type LanyingImClient = {
+type ClawchatImClient = {
   login: (params: {
     name?: string;
     password: string;
@@ -65,13 +66,13 @@ type LanyingImClient = {
 };
 
 const meta = {
-  id: LANYING_CHANNEL_ID,
-  label: "Lanying",
-  selectionLabel: "Lanying IM",
-  detailLabel: "Lanying IM",
-  docsPath: "/channels/lanying",
-  docsLabel: "lanying",
-  blurb: "Lanying IM channel for OpenClaw.",
+  id: CLAWCHAT_CHANNEL_ID,
+  label: "ClawChat",
+  selectionLabel: "ClawChat IM",
+  detailLabel: "ClawChat IM",
+  docsPath: "/channels/clawchat",
+  docsLabel: "clawchat",
+  blurb: "ClawChat IM channel for OpenClaw.",
   order: 90,
 };
 
@@ -219,7 +220,7 @@ function ensureXmlHttpRequestPolyfill(): void {
   }
   (globalThis as unknown as { XMLHttpRequest: typeof NodeXmlHttpRequest }).XMLHttpRequest =
     NodeXmlHttpRequest;
-  logDebug("installed XMLHttpRequest polyfill for lanying sdk");
+  logDebug("installed XMLHttpRequest polyfill for clawchat sdk");
 }
 
 function maskText(value: string): string {
@@ -316,26 +317,26 @@ function installConsoleRedaction(): void {
 
 function logDebug(message: string, data?: unknown): void {
   if (data === undefined) {
-    console.log(`[lanying] ${message}`);
+    console.log(`[clawchat] ${message}`);
     return;
   }
-  console.log(`[lanying] ${message}`, redactForLog(data));
+  console.log(`[clawchat] ${message}`, redactForLog(data));
 }
 
 function logWarn(message: string, data?: unknown): void {
   if (data === undefined) {
-    console.warn(`[lanying] ${message}`);
+    console.warn(`[clawchat] ${message}`);
     return;
   }
-  console.warn(`[lanying] ${message}`, redactForLog(data));
+  console.warn(`[clawchat] ${message}`, redactForLog(data));
 }
 
 function logError(message: string, err?: unknown): void {
   if (err === undefined) {
-    console.error(`[lanying] ${message}`);
+    console.error(`[clawchat] ${message}`);
     return;
   }
-  console.error(`[lanying] ${message}`, redactForLog(err));
+  console.error(`[clawchat] ${message}`, redactForLog(err));
 }
 
 function sleep(ms: number): Promise<void> {
@@ -352,10 +353,10 @@ function loadFlooFactory(): FlooFactory {
   }
 
   ensureXmlHttpRequestPolyfill();
-  logDebug("loading lanying sdk", { sdkModulePath });
+  logDebug("loading clawchat sdk", { sdkModulePath });
   const code = readFileSync(sdkModulePath, "utf8");
   const hash = createHash("sha1").update(code).digest("hex").slice(0, 12);
-  const runtimeCjsDir = path.join(os.tmpdir(), "openclaw-lanying-sdk");
+  const runtimeCjsDir = path.join(os.tmpdir(), "openclaw-clawchat-sdk");
   const runtimeCjsPath = path.join(runtimeCjsDir, `floo-3.0.0-${hash}.cjs`);
 
   if (!existsSync(runtimeCjsDir)) {
@@ -375,11 +376,11 @@ function loadFlooFactory(): FlooFactory {
         : sdk;
 
   if (typeof floo !== "function") {
-    throw new Error("Invalid Lanying SDK export: flooim factory not found");
+    throw new Error("Invalid ClawChat SDK export: flooim factory not found");
   }
 
   cachedFlooFactory = floo as FlooFactory;
-  logDebug("lanying sdk loaded");
+  logDebug("clawchat sdk loaded");
   return cachedFlooFactory;
 }
 
@@ -671,7 +672,7 @@ function isCommandOuterMessage(
 }
 
 async function runGatewayCall(command: string, params: Record<string, unknown>): Promise<unknown> {
-  const runtime = getLanyingRuntime();
+  const runtime = getClawchatRuntime();
   const argv = ["openclaw", "gateway", "call", command, "--params", JSON.stringify(params)];
   logDebug("exec openclaw gateway call", {
     command,
@@ -837,7 +838,7 @@ function collectHashCandidates(
   return out;
 }
 
-function extractText(event: LanyingInboundEvent): string {
+function extractText(event: ClawchatInboundEvent): string {
   const eventAny = event as Record<string, unknown>;
   const meta = (eventAny.meta ?? eventAny) as Record<string, unknown>;
   const candidates: unknown[] = [
@@ -895,7 +896,7 @@ function extractText(event: LanyingInboundEvent): string {
 
 function normalizeAllowEntry(raw: unknown): string {
   return String(raw ?? "")
-    .replace(/^lanying:/i, "")
+    .replace(/^(?:clawchat|lanying):/i, "")
     .trim()
     .toLowerCase();
 }
@@ -914,7 +915,7 @@ function isAllowedByAllowlist(allowlist: string[], candidate: string): boolean {
 function parseGroupId(
   eventAny: Record<string, unknown>,
   meta: Record<string, unknown>,
-  event: LanyingInboundEvent,
+  event: ClawchatInboundEvent,
 ): string {
   const toType =
     String(
@@ -951,9 +952,9 @@ function parseGroupId(
 }
 
 function getGroupEntry(
-  account: ResolvedLanyingAccount,
+  account: ResolvedClawchatAccount,
   groupId: string,
-): { entry?: ResolvedLanyingAccount["groups"][string]; source: "group" | "wildcard" | "none" } {
+): { entry?: ResolvedClawchatAccount["groups"][string]; source: "group" | "wildcard" | "none" } {
   const groupEntry = account.groups[groupId];
   if (groupEntry) {
     return { entry: groupEntry, source: "group" };
@@ -965,7 +966,7 @@ function getGroupEntry(
   return { source: "none" };
 }
 
-function isGroupAllowedByPolicy(account: ResolvedLanyingAccount, groupId: string): boolean {
+function isGroupAllowedByPolicy(account: ResolvedClawchatAccount, groupId: string): boolean {
   if (account.groupPolicy === "disabled") {
     return false;
   }
@@ -980,7 +981,7 @@ function isGroupAllowedByPolicy(account: ResolvedLanyingAccount, groupId: string
 }
 
 function isGroupSenderAllowed(
-  account: ResolvedLanyingAccount,
+  account: ResolvedClawchatAccount,
   groupId: string,
   senderId: string,
 ): boolean {
@@ -998,7 +999,7 @@ function isGroupSenderAllowed(
   return isAllowedByAllowlist(senderAllowFrom, senderId);
 }
 
-function resolveGroupRequireMention(account: ResolvedLanyingAccount, groupId: string): boolean {
+function resolveGroupRequireMention(account: ResolvedClawchatAccount, groupId: string): boolean {
   const groupEntry = account.groups[groupId];
   if (typeof groupEntry?.requireMention === "boolean") {
     return groupEntry.requireMention;
@@ -1046,13 +1047,13 @@ function resolveSenderNameFromConfig(
   return "";
 }
 
-function normalizeTarget(raw: string): LanyingMessageTarget | null {
+function normalizeTarget(raw: string): ClawchatMessageTarget | null {
   const trimmed = raw.trim();
   if (!trimmed) {
     return null;
   }
 
-  const normalized = trimmed.replace(/^lanying:/i, "");
+  const normalized = trimmed.replace(/^(?:clawchat|lanying):/i, "");
   if (/^(group|g):/i.test(normalized)) {
     return { kind: "group", id: normalized.replace(/^(group|g):/i, "").trim() };
   }
@@ -1062,7 +1063,7 @@ function normalizeTarget(raw: string): LanyingMessageTarget | null {
   return { kind: "user", id: normalized };
 }
 
-function sanitizeAccountForLog(account: ResolvedLanyingAccount): Record<string, unknown> {
+function sanitizeAccountForLog(account: ResolvedClawchatAccount): Record<string, unknown> {
   return {
     accountId: account.accountId,
     enabled: account.enabled,
@@ -1077,17 +1078,25 @@ function sanitizeAccountForLog(account: ResolvedLanyingAccount): Record<string, 
   };
 }
 
-function resolveLanyingConfig(cfg: OpenClawConfig): LanyingChannelConfig {
+function resolveClawchatConfig(cfg: OpenClawConfig): ClawchatChannelConfig {
   const channels = cfg?.channels as Record<string, unknown> | undefined;
-  const raw = channels?.[LANYING_CHANNEL_ID];
-  if (!raw || typeof raw !== "object") {
-    return {};
+  const primary = channels?.[CLAWCHAT_CHANNEL_ID];
+  if (primary && typeof primary === "object") {
+    return primary as ClawchatChannelConfig;
   }
-  return raw as LanyingChannelConfig;
+  const legacy = channels?.[CLAWCHAT_LEGACY_CHANNEL_ID];
+  if (legacy && typeof legacy === "object") {
+    return legacy as ClawchatChannelConfig;
+  }
+  return {};
 }
 
-function resolveLanyingAccount(cfg: OpenClawConfig): ResolvedLanyingAccount {
-  const channelCfg = resolveLanyingConfig(cfg);
+function resolveClawchatAccount(cfg: OpenClawConfig): ResolvedClawchatAccount {
+  const channels = cfg?.channels as Record<string, unknown> | undefined;
+  const usingPrimary = Boolean(
+    channels?.[CLAWCHAT_CHANNEL_ID] && typeof channels[CLAWCHAT_CHANNEL_ID] === "object",
+  );
+  const channelCfg = resolveClawchatConfig(cfg);
   const appIdRaw = channelCfg.appId ?? channelCfg.app_id ?? "";
   const usernameRaw = channelCfg.username ?? "";
   const passwordRaw = channelCfg.password ?? "";
@@ -1109,7 +1118,7 @@ function resolveLanyingAccount(cfg: OpenClawConfig): ResolvedLanyingAccount {
     .filter(Boolean);
   const allowFrom = dmPolicy === "open" && parsedAllowFrom.length === 0 ? ["*"] : parsedAllowFrom;
   const rawGroupPolicy = String(channelCfg.groupPolicy ?? "disabled").trim().toLowerCase();
-  const groupPolicy: ResolvedLanyingAccount["groupPolicy"] =
+  const groupPolicy: ResolvedClawchatAccount["groupPolicy"] =
     rawGroupPolicy === "open" || rawGroupPolicy === "disabled" || rawGroupPolicy === "allowlist"
       ? rawGroupPolicy
       : "allowlist";
@@ -1117,7 +1126,7 @@ function resolveLanyingAccount(cfg: OpenClawConfig): ResolvedLanyingAccount {
     .map((entry) => String(entry).trim())
     .filter(Boolean);
   const groupsRaw = channelCfg.groups;
-  const groups: ResolvedLanyingAccount["groups"] = {};
+  const groups: ResolvedClawchatAccount["groups"] = {};
   if (groupsRaw && typeof groupsRaw === "object" && !Array.isArray(groupsRaw)) {
     for (const [groupIdRaw, value] of Object.entries(groupsRaw)) {
       const groupId = String(groupIdRaw).trim();
@@ -1142,9 +1151,11 @@ function resolveLanyingAccount(cfg: OpenClawConfig): ResolvedLanyingAccount {
   }
 
   return {
-    accountId: LANYING_DEFAULT_ACCOUNT_ID,
+    accountId: CLAWCHAT_DEFAULT_ACCOUNT_ID,
     enabled,
     configured: Boolean(enabled && hasCredentials),
+    configKey: usingPrimary ? CLAWCHAT_CHANNEL_ID : CLAWCHAT_LEGACY_CHANNEL_ID,
+    usesLegacyConfig: !usingPrimary && Boolean(channels?.[CLAWCHAT_LEGACY_CHANNEL_ID]),
     appId,
     username,
     password,
@@ -1158,8 +1169,8 @@ function resolveLanyingAccount(cfg: OpenClawConfig): ResolvedLanyingAccount {
   };
 }
 
-class LanyingSession {
-  private client: LanyingImClient | null = null;
+class ClawchatSession {
+  private client: ClawchatImClient | null = null;
   private accountKey: string | null = null;
   private ensureReadyInFlight: Promise<void> | null = null;
   private shutdownPromise: Promise<void> | null = null;
@@ -1172,7 +1183,7 @@ class LanyingSession {
   private shuttingDown = false;
   private loginSuccessSeen = false;
   private selfId = "";
-  private lastConfig?: ResolvedLanyingAccount;
+  private lastConfig?: ResolvedClawchatAccount;
   private onlineMarkerSent = false;
   private offlineMarkerSent = false;
   private runtimeStatusUpdater:
@@ -1332,11 +1343,11 @@ class LanyingSession {
     await queued;
   }
 
-  private currentConfigKey(account: ResolvedLanyingAccount): string {
+  private currentConfigKey(account: ResolvedClawchatAccount): string {
     return `${account.appId}::${account.username}::${account.password}`;
   }
 
-  private async createClient(account: ResolvedLanyingAccount): Promise<LanyingImClient> {
+  private async createClient(account: ResolvedClawchatAccount): Promise<ClawchatImClient> {
     const flooFactory = loadFlooFactory();
     const im = flooFactory({
       appid: account.appId,
@@ -1348,7 +1359,7 @@ class LanyingSession {
     return im;
   }
 
-  private bindListeners(account: ResolvedLanyingAccount): void {
+  private bindListeners(account: ResolvedClawchatAccount): void {
     if (!this.client || this.listenersBound) {
       return;
     }
@@ -1360,11 +1371,11 @@ class LanyingSession {
       if (!isHistoryEvent(eventAny, meta)) {
         logDebug(`inbound event: ${name}`, event);
       }
-      void this.onInbound(event as LanyingInboundEvent, "direct", account, name);
+      void this.onInbound(event as ClawchatInboundEvent, "direct", account, name);
     };
     const onGroup = (name: string, event: unknown) => {
       logDebug(`inbound event: ${name}`, event);
-      void this.onInbound(event as LanyingInboundEvent, "group", account, name);
+      void this.onInbound(event as ClawchatInboundEvent, "group", account, name);
     };
 
     // Subscribe only to documented public events from floo-web types.
@@ -1605,9 +1616,9 @@ class LanyingSession {
 
   private async handleRouterRequest(
     routerMessage: Record<string, unknown>,
-    account: ResolvedLanyingAccount,
+    account: ResolvedClawchatAccount,
   ): Promise<void> {
-    const body = extractText(routerMessage as LanyingInboundEvent);
+    const body = extractText(routerMessage as ClawchatInboundEvent);
     if (!body.trim()) {
       logWarn("skip router_request: message.content is empty", {
         keys: Object.keys(routerMessage),
@@ -1643,7 +1654,7 @@ class LanyingSession {
         Date.now(),
     );
     const routerRelayMark = true;
-    const runtime = getLanyingRuntime();
+    const runtime = getClawchatRuntime();
     const cfg = await runtime.config.loadConfig();
     let replySeq = 0;
     let deliveredCount = 0;
@@ -1651,7 +1662,7 @@ class LanyingSession {
     const sessionKey =
       chatType === "group"
         ? `router:group:${groupId}`
-        : `router:direct:${fromId || toId || this.selfId || LANYING_CHANNEL_ID}`;
+        : `router:direct:${fromId || toId || this.selfId || CLAWCHAT_CHANNEL_ID}`;
 
     const result = await runtime.channel.reply.dispatchReplyWithBufferedBlockDispatcher({
       ctx: {
@@ -1663,11 +1674,11 @@ class LanyingSession {
         AccountId: account.accountId,
         MessageSid: messageSid || undefined,
         Timestamp: Number.isFinite(timestampNum) ? timestampNum : Date.now(),
-        OriginatingChannel: LANYING_CHANNEL_ID as any,
+        OriginatingChannel: CLAWCHAT_CHANNEL_ID as any,
         OriginatingTo: chatType === "group" ? groupId : toId || this.selfId,
         ChatType: chatType,
-        Provider: LANYING_CHANNEL_ID,
-        Surface: LANYING_CHANNEL_ID,
+        Provider: CLAWCHAT_CHANNEL_ID,
+        Surface: CLAWCHAT_CHANNEL_ID,
         SenderId: fromId || undefined,
         SenderName: fromId || undefined,
       },
@@ -1726,9 +1737,9 @@ class LanyingSession {
   }
 
   private async onInbound(
-    event: LanyingInboundEvent,
+    event: ClawchatInboundEvent,
     mode: "direct" | "group",
-    account: ResolvedLanyingAccount,
+    account: ResolvedClawchatAccount,
     eventName?: string,
   ): Promise<void> {
     try {
@@ -1910,7 +1921,7 @@ class LanyingSession {
         keys: Object.keys(meta),
       });
 
-      const runtime = getLanyingRuntime();
+      const runtime = getClawchatRuntime();
       const cfg = await runtime.config.loadConfig();
       const messageSid =
         pickId(eventAny.id ?? meta.id) ||
@@ -1967,7 +1978,7 @@ class LanyingSession {
       }
       const dispatchTo = mode === "group" ? groupId : toIdRaw || account.username;
       const sessionKey = mode === "group" ? `group:${groupId}` : targetId;
-      const outboundTarget: LanyingMessageTarget =
+      const outboundTarget: ClawchatMessageTarget =
         mode === "group"
           ? {
               kind: "group",
@@ -1987,11 +1998,11 @@ class LanyingSession {
           AccountId: account.accountId,
           MessageSid: messageSid || undefined,
           Timestamp: Number.isFinite(timestampNum) ? timestampNum : Date.now(),
-          OriginatingChannel: LANYING_CHANNEL_ID as any,
+          OriginatingChannel: CLAWCHAT_CHANNEL_ID as any,
           OriginatingTo: mode === "group" ? groupId : targetId,
           ChatType: mode,
-          Provider: LANYING_CHANNEL_ID,
-          Surface: LANYING_CHANNEL_ID,
+          Provider: CLAWCHAT_CHANNEL_ID,
+          Surface: CLAWCHAT_CHANNEL_ID,
           SenderId: senderId || undefined,
           SenderName: senderId || undefined,
         },
@@ -2023,7 +2034,7 @@ class LanyingSession {
     }
   }
 
-  async ensureReady(account: ResolvedLanyingAccount): Promise<void> {
+  async ensureReady(account: ResolvedClawchatAccount): Promise<void> {
     if (this.ensureReadyInFlight) {
       try {
         await this.ensureReadyInFlight;
@@ -2042,9 +2053,9 @@ class LanyingSession {
     }
   }
 
-  private async ensureReadyOnce(account: ResolvedLanyingAccount): Promise<void> {
+  private async ensureReadyOnce(account: ResolvedClawchatAccount): Promise<void> {
     if (!account.configured) {
-      throw new Error("Lanying account is not configured (enabled/appId/username/password).");
+      throw new Error("ClawChat account is not configured (enabled/appId/username/password).");
     }
 
     const nextKey = this.currentConfigKey(account);
@@ -2077,7 +2088,7 @@ class LanyingSession {
 
     this.loginPromise = (async () => {
       if (!this.client) {
-        throw new Error("Lanying client not initialized");
+        throw new Error("ClawChat client not initialized");
       }
       this.loginSuccessSeen = false;
       logDebug("attempting login", { username: account.username });
@@ -2109,7 +2120,7 @@ class LanyingSession {
         }
         await sleep(READY_POLL_MS);
       }
-      throw new Error("Lanying SDK not logged in after login timeout");
+      throw new Error("ClawChat SDK not logged in after login timeout");
     })();
 
     try {
@@ -2156,21 +2167,24 @@ class LanyingSession {
       if (!client?.isLogin?.()) {
         return;
       }
-      const runtime = getLanyingRuntime();
+      const runtime = getClawchatRuntime();
       const cfg = (await runtime.config.loadConfig()) as OpenClawConfig & {
         models?: {
           providers?: Record<string, unknown>;
         };
       };
       const providerInited = Boolean(
-        cfg.models?.providers?.lanying &&
-          typeof cfg.models.providers.lanying === "object" &&
-          !Array.isArray(cfg.models.providers.lanying),
+        (cfg.models?.providers?.clawchat &&
+          typeof cfg.models.providers.clawchat === "object" &&
+          !Array.isArray(cfg.models.providers.clawchat)) ||
+          (cfg.models?.providers?.lanying &&
+            typeof cfg.models.providers.lanying === "object" &&
+            !Array.isArray(cfg.models.providers.lanying)),
       );
       await client.sysManage.sendRosterMessage({
         type: "text",
         uid: selfId,
-        content: "蓝莺插件已上线",
+        content: "ClawChat 插件已上线",
         ext: JSON.stringify({
           openclaw: {
             type: "online",
@@ -2197,7 +2211,7 @@ class LanyingSession {
       await this.client.sysManage.sendRosterMessage({
         type: "text",
         uid: this.selfId,
-        content: "蓝莺插件已下线",
+        content: "ClawChat 插件已下线",
         ext: JSON.stringify({ openclaw: { type: "offline" } }),
       });
       this.offlineMarkerSent = true;
@@ -2208,17 +2222,17 @@ class LanyingSession {
   }
 
   async sendText(
-    target: LanyingMessageTarget,
+    target: ClawchatMessageTarget,
     text: string,
-    account?: ResolvedLanyingAccount,
+    account?: ResolvedClawchatAccount,
   ): Promise<unknown> {
     const cfgToUse = account ?? this.lastConfig;
     if (!cfgToUse) {
-      throw new Error("Lanying session has no account context");
+      throw new Error("ClawChat session has no account context");
     }
     await this.ensureReady(cfgToUse);
     if (!this.client) {
-      throw new Error("Lanying client is not ready");
+      throw new Error("ClawChat client is not ready");
     }
 
     const payload = {
@@ -2268,7 +2282,7 @@ class LanyingSession {
         return;
       }
       const client = this.client;
-      logDebug("shutting down lanying session");
+      logDebug("shutting down clawchat session");
       await this.sendOfflineMarkerToSelf();
       try {
         client.disConnect?.();
@@ -2309,10 +2323,10 @@ class LanyingSession {
   }
 }
 
-const session = new LanyingSession();
+const session = new ClawchatSession();
 
-export const lanyingPlugin: any = {
-  id: LANYING_CHANNEL_ID,
+export const clawchatPlugin: any = {
+  id: CLAWCHAT_CHANNEL_ID,
   meta,
   capabilities: {
     chatTypes: ["direct", "group"],
@@ -2321,7 +2335,7 @@ export const lanyingPlugin: any = {
     threads: false,
     blockStreaming: false,
   },
-  reload: { configPrefixes: ["channels.lanying"] },
+  reload: { configPrefixes: ["channels.clawchat", "channels.lanying"] },
   configSchema: {
     schema: {
       type: "object",
@@ -2369,21 +2383,21 @@ export const lanyingPlugin: any = {
     uiHints: {
       enabled: {
         label: "Enabled",
-        help: "Enable the Lanying channel.",
+        help: "Enable the ClawChat channel.",
       },
       appId: {
         label: "App ID",
-        help: "Lanying application App ID.",
+        help: "ClawChat application App ID.",
         placeholder: "xxxxx",
       },
       username: {
         label: "Username",
-        help: "Lanying login username.",
+        help: "ClawChat login username.",
         placeholder: "your-account",
       },
       password: {
         label: "Password",
-        help: "Lanying login password.",
+        help: "ClawChat login password.",
         sensitive: true,
       },
       allowManage: {
@@ -2419,9 +2433,9 @@ export const lanyingPlugin: any = {
     },
   },
   config: {
-    listAccountIds: () => [LANYING_DEFAULT_ACCOUNT_ID],
-    resolveAccount: (cfg: any) => resolveLanyingAccount(cfg),
-    defaultAccountId: () => LANYING_DEFAULT_ACCOUNT_ID,
+    listAccountIds: () => [CLAWCHAT_DEFAULT_ACCOUNT_ID],
+    resolveAccount: (cfg: any) => resolveClawchatAccount(cfg),
+    defaultAccountId: () => CLAWCHAT_DEFAULT_ACCOUNT_ID,
     isConfigured: (account: any) => account.configured,
     describeAccount: (account: any) => ({
       accountId: account.accountId,
@@ -2433,16 +2447,16 @@ export const lanyingPlugin: any = {
       groupAllowFromCount: account.groupAllowFrom?.length ?? 0,
       groupsCount: Object.keys(account.groups ?? {}).length,
     }),
-    resolveAllowFrom: ({ cfg }: any) => resolveLanyingAccount(cfg).allowFrom,
+    resolveAllowFrom: ({ cfg }: any) => resolveClawchatAccount(cfg).allowFrom,
     formatAllowFrom: ({ allowFrom }: any) =>
       allowFrom.map((entry: any) => String(entry).trim()).filter(Boolean),
-    resolveDefaultTo: ({ cfg }: any) => resolveLanyingAccount(cfg).defaultTo,
+    resolveDefaultTo: ({ cfg }: any) => resolveClawchatAccount(cfg).defaultTo,
   },
   pairing: {
-    idLabel: "lanyingUserId",
-    normalizeAllowEntry: (entry: any) => entry.replace(/^lanying:/i, "").trim(),
+    idLabel: "clawchatUserId",
+    normalizeAllowEntry: (entry: any) => entry.replace(/^(?:clawchat|lanying):/i, "").trim(),
     notifyApproval: async ({ cfg, id }: any) => {
-      const account = resolveLanyingAccount(cfg);
+      const account = resolveClawchatAccount(cfg);
       if (!account.configured || !account.enabled) {
         return;
       }
@@ -2457,15 +2471,15 @@ export const lanyingPlugin: any = {
     resolveDmPolicy: ({ account }: any) => ({
       policy: account.dmPolicy ?? "pairing",
       allowFrom: account.allowFrom ?? [],
-      policyPath: "channels.lanying.dmPolicy",
-      allowFromPath: "channels.lanying.allowFrom",
-      approveHint: formatPairingApproveHint("lanying"),
-      normalizeEntry: (raw: any) => raw.replace(/^lanying:/i, "").trim(),
+      policyPath: "channels.clawchat.dmPolicy",
+      allowFromPath: "channels.clawchat.allowFrom",
+      approveHint: formatPairingApproveHint("clawchat"),
+      normalizeEntry: (raw: any) => raw.replace(/^(?:clawchat|lanying):/i, "").trim(),
     }),
     collectWarnings: ({ account }: any) => {
       if (account.enabled && !account.configured) {
         return [
-          '- Lanying is enabled but not configured. Set channels.lanying.appId, channels.lanying.username, channels.lanying.password.',
+          "- ClawChat is enabled but not configured. Set channels.clawchat.appId, channels.clawchat.username, channels.clawchat.password.",
         ];
       }
       if (
@@ -2475,7 +2489,7 @@ export const lanyingPlugin: any = {
         Object.keys(account.groups ?? {}).length === 0
       ) {
         return [
-          '- Lanying groups: groupPolicy="allowlist" but no channels.lanying.groups configured; group messages will be blocked.',
+          '- ClawChat groups: groupPolicy="allowlist" but no channels.clawchat.groups configured; group messages will be blocked.',
         ];
       }
       return [];
@@ -2495,21 +2509,21 @@ export const lanyingPlugin: any = {
     deliveryMode: "direct",
     textChunkLimit: 2000,
     sendText: async ({ cfg, to, text }: any) => {
-      const account = resolveLanyingAccount(cfg);
+      const account = resolveClawchatAccount(cfg);
       logDebug("outbound sendText requested", {
         to,
         account: sanitizeAccountForLog(account),
       });
       if (!account.enabled) {
-        throw new Error("Lanying channel is disabled.");
+        throw new Error("ClawChat channel is disabled.");
       }
       const target = normalizeTarget(to);
       if (!target || !target.id) {
-        throw new Error(`Invalid Lanying target: ${to}`);
+        throw new Error(`Invalid ClawChat target: ${to}`);
       }
       const messageId = await session.sendText(target, text, account);
       return {
-        channel: LANYING_CHANNEL_ID,
+        channel: CLAWCHAT_CHANNEL_ID,
         messageId: String(messageId ?? ""),
         chatId: target.id,
       };
@@ -2517,30 +2531,35 @@ export const lanyingPlugin: any = {
   },
   auth: {
     login: async ({ cfg }: any) => {
-      const account = resolveLanyingAccount(cfg);
+      const account = resolveClawchatAccount(cfg);
       logDebug("auth.login called", { account: sanitizeAccountForLog(account) });
       if (!account.enabled) {
-        throw new Error("Lanying channel is disabled.");
+        throw new Error("ClawChat channel is disabled.");
       }
       await session.ensureReady(account);
     },
   },
   gateway: {
     startAccount: async (ctx: any) => {
-      const account = resolveLanyingAccount(ctx.cfg);
+      const account = resolveClawchatAccount(ctx.cfg);
       if (!account.enabled) {
-        ctx.log?.info?.("[lanying] account disabled, skip startup");
+        ctx.log?.info?.("[clawchat] account disabled, skip startup");
         return { stop: () => {} };
       }
       if (!account.configured) {
-        const reason = "Lanying is not configured (appId/username/password)";
-        ctx.log?.warn?.(`[lanying] ${reason}`);
+        const reason = "ClawChat is not configured (appId/username/password)";
+        ctx.log?.warn?.(`[clawchat] ${reason}`);
         throw new Error(reason);
       }
 
-      ctx.log?.info?.(`[lanying] starting account ${ctx.accountId}`);
+      if (account.usesLegacyConfig) {
+        ctx.log?.warn?.(
+          "[clawchat] legacy config detected at channels.lanying; migrate to channels.clawchat.",
+        );
+      }
+      ctx.log?.info?.(`[clawchat] starting account ${ctx.accountId}`);
       ctx.log?.debug?.(
-        `[lanying] resolved account: ${JSON.stringify(sanitizeAccountForLog(account))}`,
+        `[clawchat] resolved account: ${JSON.stringify(sanitizeAccountForLog(account))}`,
       );
       session.bindRuntimeStatus({
         accountId: ctx.accountId,
@@ -2589,7 +2608,7 @@ export const lanyingPlugin: any = {
       });
     },
     stopAccount: async (ctx: any) => {
-      ctx.log?.info?.("[lanying] stopAccount called");
+      ctx.log?.info?.("[clawchat] stopAccount called");
       session.clearRuntimeStatus(ctx.accountId);
       await session.shutdown();
     },
