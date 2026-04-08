@@ -1391,18 +1391,10 @@ class ClawchatSession {
   }
 
   private resolveStateDir(): string {
-    const override = process.env.OPENCLAW_STATE_DIR?.trim();
-    if (override) {
-      return this.resolveUserPath(override);
-    }
     return path.join(os.homedir(), ".openclaw");
   }
 
   private resolveDefaultAgentWorkspaceDir(): string {
-    const profile = process.env.OPENCLAW_PROFILE?.trim();
-    if (profile && profile.toLowerCase() !== "default") {
-      return path.join(os.homedir(), ".openclaw", `workspace-${profile}`);
-    }
     return path.join(os.homedir(), ".openclaw", "workspace");
   }
 
