@@ -77,6 +77,10 @@ const meta = {
 };
 
 const require = createRequire(import.meta.url);
+const channelPackageJson = require("../package.json") as { version?: string };
+const CLAWCHAT_PLUGIN_VERSION =
+  typeof channelPackageJson?.version === "string" ? channelPackageJson.version.trim() : "";
+const CLAWCHAT_API_VERSION = 2;
 const sdkModulePath = path.resolve(
   path.dirname(fileURLToPath(import.meta.url)),
   "./lanying-im-sdk/floo-3.0.0.js",
@@ -685,9 +689,16 @@ function extractRouterSignal(
   meta: Record<string, unknown>,
 ):
   | {
+      type: "router_context";
+      message: Record<string, unknown>;
+      knowledge: string;
+      coldStart: boolean;
+    }
+  | {
       type: "router_request";
       message: Record<string, unknown>;
       knowledge: string;
+      coldStart: boolean;
     }
   | { type: "router_reply" }
   | null {
@@ -708,20 +719,22 @@ function extractRouterSignal(
     if (signalType === "router_reply") {
       return { type: "router_reply" };
     }
-    if (signalType !== "router_request") {
+    if (signalType !== "router_request" && signalType !== "router_context") {
       continue;
     }
     const message = parseMetaMessage(openclawObj.message);
     if (message) {
       const knowledge =
         typeof openclawObj.knowledge === "string" ? openclawObj.knowledge.trim() : "";
+      const coldStart = openclawObj.cold_start === true;
       return {
-        type: "router_request",
+        type: signalType === "router_context" ? "router_context" : "router_request",
         message,
         knowledge,
+        coldStart,
       };
     }
-    logWarn("skip router_request: openclaw.message is invalid", {
+    logWarn("skip router signal: openclaw.message is invalid", {
       signalType,
       messageType: typeof openclawObj.message,
     });
@@ -1362,7 +1375,76 @@ class ClawchatSession {
     return `[Group context messages since last trigger]\n${lines.join("\n")}`;
   }
 
-  private async runRouterRequestInGroupQueue(params: {
+  private buildBodyWithPendingGroupContext(groupId: string, body: string, isSlashCommand: boolean): string {
+    if (isSlashCommand) {
+      return body;
+    }
+    const pendingContext = this.consumePendingGroupContext(groupId);
+    if (!pendingContext) {
+      return body;
+    }
+    const contextBytes = Buffer.byteLength(pendingContext, "utf8");
+    const contextPreview = Buffer.from(pendingContext, "utf8").subarray(0, 4096).toString("utf8");
+    logDebug("group pending context attached", {
+      groupId,
+      contextBytes,
+      contextPreview,
+      contextPreviewTruncated: contextBytes > 4096,
+    });
+    return `${pendingContext}\n\n[Current message]\n${body}`;
+  }
+
+  private async handleRouterContext(
+    routerMessage: Record<string, unknown>,
+    requestSid: string,
+    groupId: string,
+  ): Promise<void> {
+    const body = extractText(routerMessage as ClawchatInboundEvent);
+    const trimmedGroupId = groupId.trim();
+    if (!trimmedGroupId) {
+      logWarn("skip router_context: groupId missing", {
+        requestSid,
+        keys: Object.keys(routerMessage),
+      });
+      return;
+    }
+    const fromId =
+      pickId(routerMessage.from) ||
+      pickId((routerMessage as { sender_id?: unknown }).sender_id) ||
+      "";
+    const timestampNum = Number(
+      (routerMessage as { timestamp?: unknown }).timestamp ??
+        (routerMessage as { ts?: unknown }).ts ??
+        Date.now(),
+    );
+    const routerMeta = routerMessage as Record<string, unknown>;
+    const cleanedBody = removeOpenclawEdgeMention(
+      body,
+      resolveToUserNicknameFromConfig(routerMeta, routerMeta),
+    ).trim();
+    if (!cleanedBody) {
+      logDebug("skip router_context: empty body after cleanup", {
+        requestSid,
+        groupId: trimmedGroupId,
+      });
+      return;
+    }
+    this.appendPendingGroupContext({
+      groupId: trimmedGroupId,
+      senderId: fromId || trimmedGroupId,
+      senderName: resolveSenderNameFromConfig(routerMeta, routerMeta) || undefined,
+      body: cleanedBody,
+      timestamp: Number.isFinite(timestampNum) ? timestampNum : Date.now(),
+    });
+    logDebug("router_context stored in pending group context", {
+      requestSid,
+      groupId: trimmedGroupId,
+      senderId: fromId || undefined,
+      bodyPreview: cleanedBody.slice(0, 80),
+    });
+  }
+
+  private async runRouterSignalInGroupQueue(params: {
     groupId: string;
     requestSid: string;
     run: () => Promise<void>;
@@ -1381,13 +1463,13 @@ class ClawchatSession {
       this.routerGroupQueueByGroupId.set(groupId, queueEntry);
     }
     queueEntry.pending += 1;
-    logDebug("router_request group queue enqueue", {
+    logDebug("router_signal group queue enqueue", {
       groupId,
       requestSid: params.requestSid || undefined,
       queueLength: queueEntry.pending,
     });
     const runQueued = async () => {
-      logDebug("router_request group queue start", {
+      logDebug("router_signal group queue start", {
         groupId,
         requestSid: params.requestSid || undefined,
         queueLength: queueEntry.pending,
@@ -1400,7 +1482,7 @@ class ClawchatSession {
         if (queueLength === 0 && this.routerGroupQueueByGroupId.get(groupId) === queueEntry) {
           this.routerGroupQueueByGroupId.delete(groupId);
         }
-        logDebug("router_request group queue dequeue", {
+        logDebug("router_signal group queue dequeue", {
           groupId,
           requestSid: params.requestSid || undefined,
           queueLength,
@@ -2040,14 +2122,18 @@ class ClawchatSession {
     const cleanedBody = removeOpenclawEdgeMention(body, toUserNickname);
     const trimmedBody = cleanedBody.trim();
     const isSlashCommand = trimmedBody.startsWith("/");
+    const replyTo = replyTargetSnapshot.replyId;
+    const bodyToDispatch =
+      replyTargetSnapshot.replyKind === "group"
+        ? this.buildBodyWithPendingGroupContext(replyTo, cleanedBody, isSlashCommand)
+        : cleanedBody;
     const bodyWithKnowledge =
       knowledge.trim().length > 0
-        ? ["[Retrieved knowledge context]", knowledge.trim(), "[End knowledge context]", "", cleanedBody].join("\n")
-        : cleanedBody;
+        ? ["[Retrieved knowledge context]", knowledge.trim(), "[End knowledge context]", "", bodyToDispatch].join("\n")
+        : bodyToDispatch;
     let replySeq = 0;
     let deliveredCount = 0;
     const replyFrom = this.selfId || toId || fromId;
-    const replyTo = replyTargetSnapshot.replyId;
     const replyToType = replyTargetSnapshot.replyKind === "group" ? "group" : "roster";
     const dispatchTo = replyTargetSnapshot.replyKind === "group" ? replyTo : toId || this.selfId;
     const sessionKey =
@@ -2276,21 +2362,60 @@ class ClawchatSession {
           });
           return;
         }
-        if (isSelfLoopback && account.allowManage && routerSignal?.type === "router_request") {
+        if (
+          isSelfLoopback &&
+          account.allowManage &&
+          (routerSignal?.type === "router_request" || routerSignal?.type === "router_context")
+        ) {
           if (!isCommandOuterMessage(eventAny, meta)) {
-            logDebug("skip loopback router_request: outer type is not command", {
+            logDebug("skip loopback router signal: outer type is not command", {
               senderId,
               toId: toIdRaw,
               selfId: this.selfId,
+              routerSignalType: routerSignal.type,
             });
             return;
           }
-          logDebug("processing loopback router_request", {
+          logDebug("processing loopback router signal", {
             senderId,
             toId: toIdRaw,
             selfId: this.selfId,
+            routerSignalType: routerSignal.type,
             knowledgeBytes: Buffer.byteLength(routerSignal.knowledge ?? "", "utf8"),
           });
+          const requestSid =
+            pickId(routerSignal.message.id) ||
+            pickId((routerSignal.message as { message_id?: unknown }).message_id) ||
+            "";
+          const routerChatType = String(
+            (routerSignal.message as { toType?: unknown }).toType ??
+              (routerSignal.message as { to_type?: unknown }).to_type ??
+              "",
+          )
+            .trim()
+            .toLowerCase();
+          const routerGroupId =
+            routerChatType === "group"
+              ? pickId(routerSignal.message.to) ||
+                pickId((routerSignal.message as { group_id?: unknown }).group_id) ||
+                ""
+              : "";
+          if (routerSignal.type === "router_context") {
+            if (!routerGroupId) {
+              logWarn("skip router_context: group target missing", {
+                outerEventId: pickId(eventAny.id ?? meta.id) || undefined,
+                requestSid: requestSid || undefined,
+                routerMessageKeys: Object.keys(routerSignal.message),
+              });
+              return;
+            }
+            await this.runRouterSignalInGroupQueue({
+              groupId: routerGroupId,
+              requestSid,
+              run: () => this.handleRouterContext(routerSignal.message, requestSid, routerGroupId),
+            });
+            return;
+          }
           const replyTargetSnapshot = resolveRouterReplyTargetSnapshot(routerSignal.message);
           if (!replyTargetSnapshot) {
             logError("skip router_request: failed to resolve reply target snapshot", {
@@ -2300,7 +2425,7 @@ class ClawchatSession {
             return;
           }
           if (replyTargetSnapshot.replyKind === "group") {
-            await this.runRouterRequestInGroupQueue({
+            await this.runRouterSignalInGroupQueue({
               groupId: replyTargetSnapshot.replyId,
               requestSid: replyTargetSnapshot.requestSid,
               run: () =>
@@ -2454,18 +2579,7 @@ class ClawchatSession {
       }
       let bodyToDispatch = cleanedBody;
       if (mode === "group") {
-        const pendingContext = this.consumePendingGroupContext(groupId);
-        if (pendingContext && !isSlashCommand) {
-          bodyToDispatch = `${pendingContext}\n\n[Current message]\n${cleanedBody}`;
-          const contextBytes = Buffer.byteLength(pendingContext, "utf8");
-          const contextPreview = Buffer.from(pendingContext, "utf8").subarray(0, 4096).toString("utf8");
-          logDebug("group pending context attached", {
-            groupId,
-            contextBytes,
-            contextPreview,
-            contextPreviewTruncated: contextBytes > 4096,
-          });
-        }
+        bodyToDispatch = this.buildBodyWithPendingGroupContext(groupId, cleanedBody, isSlashCommand);
       }
       const dispatchTo = mode === "group" ? groupId : toIdRaw || account.username;
       const sessionKey = mode === "group" ? `group:${groupId}` : targetId;
@@ -2710,6 +2824,8 @@ class ClawchatSession {
           openclaw: {
             type: "online",
             provider_inited: providerInited,
+            plugin_version: CLAWCHAT_PLUGIN_VERSION,
+            api_version: CLAWCHAT_API_VERSION,
           },
         }),
       });
