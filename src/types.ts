@@ -2,6 +2,8 @@ export const CLAWCHAT_CHANNEL_ID = "clawchat";
 export const CLAWCHAT_LEGACY_CHANNEL_ID = "lanying";
 export const CLAWCHAT_DEFAULT_ACCOUNT_ID = "default";
 
+export type OpenClawConfig = Record<string, any>;
+
 export type ClawchatGroupPolicy = "open" | "disabled" | "allowlist";
 
 export type ClawchatGroupConfig = {

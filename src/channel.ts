@@ -1,21 +1,52 @@
-import { copyFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import * as fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { createRequire } from "node:module";
 import { fileURLToPath } from "node:url";
 import { createHash } from "node:crypto";
 import { getClawchatRuntime } from "./runtime.js";
+import { logDebug, logError, logWarn } from "./logging.js";
+import {
+  collectHashCandidates,
+  extractConfigPatchRaw,
+  extractPresetPromptSync,
+  extractRouterSignal,
+  extractText,
+  isCommandOuterMessage,
+  isHistoryEvent,
+  removeOpenclawEdgeMention,
+  resolveRouterReplyTargetSnapshot,
+  type RouterReplyTargetSnapshot,
+} from "./channel-message.js";
+import {
+  hasSelfMentionInConfig,
+  isGroupAllowedByPolicy,
+  isGroupSenderAllowed,
+  normalizeAllowEntry,
+  normalizeTarget,
+  parseGroupId,
+  resolveClawchatAccount,
+  resolveClawchatConfig,
+  resolveGroupRequireMention,
+  resolveSenderNameFromConfig,
+  resolveToUserNicknameFromConfig,
+  sanitizeAccountForLog,
+} from "./channel-config.js";
+import {
+  findBaseHash,
+  isConfigChangedSinceLastLoadError,
+  parseJsonFromMixedText,
+  runGatewayCall,
+} from "./openclaw-gateway.js";
+import { asPlainObject, pickId, stripAnsi } from "./utils.js";
 import {
   CLAWCHAT_CHANNEL_ID,
   CLAWCHAT_DEFAULT_ACCOUNT_ID,
-  CLAWCHAT_LEGACY_CHANNEL_ID,
-  type ClawchatChannelConfig,
   type ClawchatInboundEvent,
   type ClawchatMessageTarget,
+  type OpenClawConfig,
   type ResolvedClawchatAccount,
 } from "./types.js";
-
-type OpenClawConfig = Record<string, any>;
 
 type FlooFactory = (options: Record<string, unknown>) => ClawchatImClient;
 
@@ -97,21 +128,6 @@ const GROUP_CONTEXT_MAX_CHARS = 6_000;
 const CLAWCHAT_MANAGED_DIR = "clawchat";
 const CLAWCHAT_MANAGED_AGENTS_PATH = `${CLAWCHAT_MANAGED_DIR}/AGENTS.md`;
 const DEFAULT_AGENT_ID = "main";
-const LOG_MASK = "******";
-const SENSITIVE_KEY_PATTERN =
-  "(?:password|pass|pwd|api[_-]?key|token|secret|authorization|auth|cookie|session|private[_-]?key)";
-const SENSITIVE_KEY_RE = new RegExp(SENSITIVE_KEY_PATTERN, "i");
-const SENSITIVE_INLINE_RE = new RegExp(
-  `((?:${SENSITIVE_KEY_PATTERN})\\s*[:=]\\s*["']?)([^"',\\s}]+)(["']?)`,
-  "gi",
-);
-const SENSITIVE_ESCAPED_JSON_RE = new RegExp(
-  `((?:\\\\?["'])${SENSITIVE_KEY_PATTERN}(?:\\\\?["'])\\s*:\\s*(?:\\\\?["']))([^"\\\\]*(?:\\\\.[^"\\\\]*)*)(\\\\?["'])`,
-  "gi",
-);
-let consoleRedactionInstalled = false;
-
-installConsoleRedaction();
 
 class NodeXmlHttpRequest {
   readyState = 0;
@@ -230,124 +246,18 @@ function ensureXmlHttpRequestPolyfill(): void {
   logDebug("installed XMLHttpRequest polyfill for clawchat sdk");
 }
 
-function maskText(value: string): string {
-  if (!value) {
-    return value;
-  }
-  return LOG_MASK;
-}
-
-function redactString(value: string): string {
-  const parsed = maybeParseJson(value);
-  if (parsed && typeof parsed === "object") {
-    try {
-      return JSON.stringify(redactForLog(parsed));
-    } catch {
-      // Fall back to inline replacement.
-    }
-  }
-  return value
-    .replace(
-      SENSITIVE_ESCAPED_JSON_RE,
-      (_full, prefix: string, _secret: string, suffix: string) => {
-        return `${prefix}${LOG_MASK}${suffix}`;
-      },
-    )
-    .replace(SENSITIVE_INLINE_RE, (_full, prefix: string, _secret: string, suffix: string) => {
-      return `${prefix}${LOG_MASK}${suffix}`;
-    });
-}
-
-function redactForLog(value: unknown, parentKey = "", depth = 0): unknown {
-  if (depth > 8) {
-    return "[redaction-depth-limit]";
-  }
-  if (value === null || value === undefined) {
-    return value;
-  }
-  if (value instanceof Error) {
-    return {
-      name: value.name,
-      message: redactString(String(value.message ?? "")),
-      stack: value.stack ? redactString(value.stack) : undefined,
-    };
-  }
-  if (typeof value === "string") {
-    if (SENSITIVE_KEY_RE.test(parentKey)) {
-      return maskText(value);
-    }
-    return redactString(value);
-  }
-  if (typeof value === "number" || typeof value === "boolean" || typeof value === "bigint") {
-    if (SENSITIVE_KEY_RE.test(parentKey)) {
-      return LOG_MASK;
-    }
-    return value;
-  }
-  if (Array.isArray(value)) {
-    return value.map((item) => redactForLog(item, parentKey, depth + 1));
-  }
-  if (typeof value === "object") {
-    const out: Record<string, unknown> = {};
-    for (const [k, v] of Object.entries(value as Record<string, unknown>)) {
-      if (SENSITIVE_KEY_RE.test(k)) {
-        out[k] = LOG_MASK;
-        continue;
-      }
-      out[k] = redactForLog(v, k, depth + 1);
-    }
-    return out;
-  }
-  return value;
-}
-
-function installConsoleRedaction(): void {
-  if (consoleRedactionInstalled) {
-    return;
-  }
-  consoleRedactionInstalled = true;
-  const methods: Array<"log" | "warn" | "error" | "info" | "debug"> = [
-    "log",
-    "warn",
-    "error",
-    "info",
-    "debug",
-  ];
-  for (const method of methods) {
-    const current = console[method].bind(console);
-    console[method] = ((...args: unknown[]) => {
-      const sanitized = args.map((arg) => redactForLog(arg));
-      current(...sanitized);
-    }) as typeof console[typeof method];
-  }
-}
-
-function logDebug(message: string, data?: unknown): void {
-  if (data === undefined) {
-    console.log(`[clawchat] ${message}`);
-    return;
-  }
-  console.log(`[clawchat] ${message}`, redactForLog(data));
-}
-
-function logWarn(message: string, data?: unknown): void {
-  if (data === undefined) {
-    console.warn(`[clawchat] ${message}`);
-    return;
-  }
-  console.warn(`[clawchat] ${message}`, redactForLog(data));
-}
-
-function logError(message: string, err?: unknown): void {
-  if (err === undefined) {
-    console.error(`[clawchat] ${message}`);
-    return;
-  }
-  console.error(`[clawchat] ${message}`, redactForLog(err));
-}
-
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function writeUtf8FileSync(filePath: string, content: string): void {
+  const writer = (fs as Record<string, unknown>).writeFileSync;
+  if (typeof writer !== "function") {
+    throw new Error("node:fs.writeFileSync is unavailable in this runtime");
+  }
+  (
+    writer as (path: string, data: string, encoding: string) => void
+  )(filePath, content, "utf8");
 }
 
 function formatPairingApproveHint(channel: string): string {
@@ -361,16 +271,16 @@ function loadFlooFactory(): FlooFactory {
 
   ensureXmlHttpRequestPolyfill();
   logDebug("loading clawchat sdk", { sdkModulePath });
-  const code = readFileSync(sdkModulePath, "utf8");
+  const code = fs.readFileSync(sdkModulePath, "utf8");
   const hash = createHash("sha1").update(code).digest("hex").slice(0, 12);
   const runtimeCjsDir = path.join(os.tmpdir(), "openclaw-clawchat-sdk");
   const runtimeCjsPath = path.join(runtimeCjsDir, `floo-3.0.0-${hash}.cjs`);
 
-  if (!existsSync(runtimeCjsDir)) {
-    mkdirSync(runtimeCjsDir, { recursive: true });
+  if (!fs.existsSync(runtimeCjsDir)) {
+    fs.mkdirSync(runtimeCjsDir, { recursive: true });
   }
-  if (!existsSync(runtimeCjsPath)) {
-    copyFileSync(sdkModulePath, runtimeCjsPath);
+  if (!fs.existsSync(runtimeCjsPath)) {
+    fs.copyFileSync(sdkModulePath, runtimeCjsPath);
     logDebug("copied sdk to cjs runtime path", { runtimeCjsPath });
   }
 
@@ -389,23 +299,6 @@ function loadFlooFactory(): FlooFactory {
   cachedFlooFactory = floo as FlooFactory;
   logDebug("clawchat sdk loaded");
   return cachedFlooFactory;
-}
-
-function pickId(value: unknown): string {
-  if (typeof value === "string" || typeof value === "number") {
-    return String(value);
-  }
-  if (value && typeof value === "object") {
-    const uid = (value as { uid?: unknown }).uid;
-    if (typeof uid === "string" || typeof uid === "number") {
-      return String(uid);
-    }
-    const id = (value as { id?: unknown }).id;
-    if (typeof id === "string" || typeof id === "number") {
-      return String(id);
-    }
-  }
-  return "";
 }
 
 function pickNumberId(value: unknown): number | null {
@@ -432,723 +325,6 @@ function pickNumberId(value: unknown): number | null {
   return null;
 }
 
-function maybeParseJson(text: string): unknown {
-  const trimmed = text.trim();
-  if (!trimmed || (!trimmed.startsWith("{") && !trimmed.startsWith("["))) {
-    return null;
-  }
-  try {
-    return JSON.parse(trimmed);
-  } catch {
-    return null;
-  }
-}
-
-function asPlainObject(value: unknown): Record<string, unknown> | null {
-  if (!value || typeof value !== "object" || Array.isArray(value)) {
-    return null;
-  }
-  return value as Record<string, unknown>;
-}
-
-function stripAnsi(text: string): string {
-  return text.replace(/\u001b\[[0-9;]*m/g, "");
-}
-
-function isConfigChangedSinceLastLoadError(err: unknown): boolean {
-  const text =
-    typeof err === "string"
-      ? err
-      : err instanceof Error
-        ? `${err.message}\n${err.stack ?? ""}`
-        : "";
-  return /config changed since last load; re-run config\.get and retry/i.test(text);
-}
-
-function parseJsonFromMixedText(text: string): unknown {
-  const cleaned = stripAnsi(text).trim();
-  if (!cleaned) {
-    return null;
-  }
-
-  const direct = maybeParseJson(cleaned);
-  if (direct !== null) {
-    return direct;
-  }
-
-  const fencedMatches = cleaned.match(/```(?:json)?\s*([\s\S]*?)```/gi) ?? [];
-  for (const block of fencedMatches) {
-    const body = block.replace(/^```(?:json)?\s*/i, "").replace(/```$/i, "").trim();
-    const parsed = maybeParseJson(body);
-    if (parsed !== null) {
-      return parsed;
-    }
-  }
-
-  const firstObj = cleaned.indexOf("{");
-  const lastObj = cleaned.lastIndexOf("}");
-  if (firstObj >= 0 && lastObj > firstObj) {
-    const parsed = maybeParseJson(cleaned.slice(firstObj, lastObj + 1));
-    if (parsed !== null) {
-      return parsed;
-    }
-  }
-
-  const firstArr = cleaned.indexOf("[");
-  const lastArr = cleaned.lastIndexOf("]");
-  if (firstArr >= 0 && lastArr > firstArr) {
-    const parsed = maybeParseJson(cleaned.slice(firstArr, lastArr + 1));
-    if (parsed !== null) {
-      return parsed;
-    }
-  }
-
-  for (const line of cleaned.split(/\r?\n/)) {
-    const t = line.trim();
-    const parsed = maybeParseJson(t);
-    if (parsed !== null) {
-      return parsed;
-    }
-  }
-  return null;
-}
-
-function parseExtValue(value: unknown): Record<string, unknown> | null {
-  if (!value) {
-    return null;
-  }
-  if (typeof value === "string") {
-    const parsed = maybeParseJson(value);
-    if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
-      return parsed as Record<string, unknown>;
-    }
-    return null;
-  }
-  if (typeof value === "object" && !Array.isArray(value)) {
-    return value as Record<string, unknown>;
-  }
-  return null;
-}
-
-function parseConfigValue(value: unknown): Record<string, unknown> | null {
-  if (!value) {
-    return null;
-  }
-  if (typeof value === "string") {
-    const parsed = maybeParseJson(value);
-    if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
-      return parsed as Record<string, unknown>;
-    }
-    return null;
-  }
-  if (typeof value === "object" && !Array.isArray(value)) {
-    return value as Record<string, unknown>;
-  }
-  return null;
-}
-
-function hasSelfMentionInConfig(
-  eventAny: Record<string, unknown>,
-  meta: Record<string, unknown>,
-  selfId: string,
-): boolean {
-  const selfNorm = selfId.trim();
-  if (!selfNorm) {
-    return false;
-  }
-  const payload = (eventAny.payload ?? meta.payload) as Record<string, unknown> | undefined;
-  const configCandidates = [
-    parseConfigValue((eventAny as { config?: unknown }).config),
-    parseConfigValue((meta as { config?: unknown }).config),
-    parseConfigValue(payload?.config),
-  ].filter(Boolean) as Record<string, unknown>[];
-
-  for (const config of configCandidates) {
-    const mentionListRaw = (config as { mentionList?: unknown; mention_list?: unknown }).mentionList
-      ?? (config as { mention_list?: unknown }).mention_list;
-    if (!Array.isArray(mentionListRaw)) {
-      continue;
-    }
-    for (const item of mentionListRaw) {
-      const mentionId = pickId(item);
-      if (mentionId && mentionId.trim() === selfNorm) {
-        return true;
-      }
-    }
-  }
-  return false;
-}
-
-function resolveToUserNicknameFromConfig(
-  eventAny: Record<string, unknown>,
-  meta: Record<string, unknown>,
-): string {
-  const payload = (eventAny.payload ?? meta.payload) as Record<string, unknown> | undefined;
-  const configCandidates = [
-    parseConfigValue((eventAny as { config?: unknown }).config),
-    parseConfigValue((meta as { config?: unknown }).config),
-    parseConfigValue(payload?.config),
-  ].filter(Boolean) as Record<string, unknown>[];
-
-  for (const config of configCandidates) {
-    const nickname = (config.to_user_nickname ?? config.toUserNickname) as unknown;
-    if (typeof nickname === "string" && nickname.trim()) {
-      return nickname.trim();
-    }
-  }
-  return "";
-}
-
-function removeOpenclawEdgeMention(content: string, toUserNickname: string): string {
-  const nickname = toUserNickname.trim();
-  if (!nickname) {
-    return content;
-  }
-  const escapedNickname = nickname.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-  const withoutPrefix = content.replace(new RegExp(`^@${escapedNickname}(?:\\u2005| )+`), "");
-  const withoutSuffix = withoutPrefix.replace(new RegExp(`@${escapedNickname}(?:\\u2005| )*$`), "");
-  return withoutSuffix.trim();
-}
-
-function extractConfigPatchRaw(
-  eventAny: Record<string, unknown>,
-  meta: Record<string, unknown>,
-): string | null {
-  const payload = (eventAny.payload ?? meta.payload) as Record<string, unknown> | undefined;
-  const extObjCandidates = [
-    parseExtValue(eventAny.ext),
-    parseExtValue(meta.ext),
-    parseExtValue(payload?.ext),
-  ].filter(Boolean) as Record<string, unknown>[];
-
-  for (const extObj of extObjCandidates) {
-    const openclaw = extObj.openclaw;
-    if (!openclaw || typeof openclaw !== "object" || Array.isArray(openclaw)) {
-      continue;
-    }
-    const openclawObj = openclaw as Record<string, unknown>;
-    if (openclawObj.type !== "config_patch") {
-      continue;
-    }
-    const raw = openclawObj.raw ?? openclawObj.patch ?? openclawObj.config_patch;
-    if (typeof raw === "string" && raw.trim()) {
-      return raw;
-    }
-  }
-  return null;
-}
-
-function parseMetaMessage(value: unknown): Record<string, unknown> | null {
-  if (!value) {
-    return null;
-  }
-  if (typeof value === "string") {
-    const parsed = maybeParseJson(value);
-    if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
-      return parsed as Record<string, unknown>;
-    }
-    return null;
-  }
-  if (typeof value === "object" && !Array.isArray(value)) {
-    return value as Record<string, unknown>;
-  }
-  return null;
-}
-
-function extractPresetPromptSync(
-  eventAny: Record<string, unknown>,
-  meta: Record<string, unknown>,
-): { chatbotId: string; chatbotName: string; prompt: string } | null {
-  const payload = (eventAny.payload ?? meta.payload) as Record<string, unknown> | undefined;
-  const extObjCandidates = [
-    parseExtValue(eventAny.ext),
-    parseExtValue(meta.ext),
-    parseExtValue(payload?.ext),
-  ].filter(Boolean) as Record<string, unknown>[];
-
-  for (const extObj of extObjCandidates) {
-    const openclaw = extObj.openclaw;
-    if (!openclaw || typeof openclaw !== "object" || Array.isArray(openclaw)) {
-      continue;
-    }
-    const openclawObj = openclaw as Record<string, unknown>;
-    if (String(openclawObj.type ?? "").trim() !== "preset_prompt_sync") {
-      continue;
-    }
-    return {
-      chatbotId: String(openclawObj.chatbotId ?? "").trim(),
-      chatbotName: String(openclawObj.chatbotName ?? "").trim(),
-      prompt: typeof openclawObj.prompt === "string" ? openclawObj.prompt : "",
-    };
-  }
-  return null;
-}
-
-function extractRouterSignal(
-  eventAny: Record<string, unknown>,
-  meta: Record<string, unknown>,
-):
-  | {
-      type: "router_context";
-      message: Record<string, unknown>;
-      knowledge: string;
-      coldStart: boolean;
-    }
-  | {
-      type: "router_request";
-      message: Record<string, unknown>;
-      knowledge: string;
-      coldStart: boolean;
-    }
-  | { type: "router_reply" }
-  | null {
-  const payload = (eventAny.payload ?? meta.payload) as Record<string, unknown> | undefined;
-  const extObjCandidates = [
-    parseExtValue(eventAny.ext),
-    parseExtValue(meta.ext),
-    parseExtValue(payload?.ext),
-  ].filter(Boolean) as Record<string, unknown>[];
-
-  for (const extObj of extObjCandidates) {
-    const openclaw = extObj.openclaw;
-    if (!openclaw || typeof openclaw !== "object" || Array.isArray(openclaw)) {
-      continue;
-    }
-    const openclawObj = openclaw as Record<string, unknown>;
-    const signalType = String(openclawObj.type ?? "").trim();
-    if (signalType === "router_reply") {
-      return { type: "router_reply" };
-    }
-    if (signalType !== "router_request" && signalType !== "router_context") {
-      continue;
-    }
-    const message = parseMetaMessage(openclawObj.message);
-    if (message) {
-      const knowledge =
-        typeof openclawObj.knowledge === "string" ? openclawObj.knowledge.trim() : "";
-      const coldStart = openclawObj.cold_start === true;
-      return {
-        type: signalType === "router_context" ? "router_context" : "router_request",
-        message,
-        knowledge,
-        coldStart,
-      };
-    }
-    logWarn("skip router signal: openclaw.message is invalid", {
-      signalType,
-      messageType: typeof openclawObj.message,
-    });
-  }
-  return null;
-}
-
-type RouterReplyTargetSnapshot = {
-  requestSid: string;
-  replyKind: "group" | "user";
-  replyId: string;
-};
-
-function resolveRouterReplyTargetSnapshot(
-  routerMessage: Record<string, unknown>,
-): RouterReplyTargetSnapshot | null {
-  const requestSid =
-    pickId(routerMessage.id) || pickId((routerMessage as { message_id?: unknown }).message_id);
-  if (!requestSid) {
-    return null;
-  }
-  const fromId =
-    pickId(routerMessage.from) ||
-    pickId((routerMessage as { sender_id?: unknown }).sender_id) ||
-    "";
-  const toId =
-    pickId(routerMessage.to) ||
-    pickId((routerMessage as { uid?: unknown }).uid) ||
-    "";
-  const toType = String(
-    (routerMessage as { toType?: unknown }).toType ??
-      (routerMessage as { to_type?: unknown }).to_type ??
-      "",
-  )
-    .trim()
-    .toLowerCase();
-  const explicitGroupId =
-    pickId((routerMessage as { gid?: unknown }).gid) ||
-    pickId((routerMessage as { group_id?: unknown }).group_id) ||
-    pickId((routerMessage as { conversation_id?: unknown }).conversation_id) ||
-    "";
-  const replyGroupId = explicitGroupId || (toType === "group" ? toId : "");
-  if (replyGroupId) {
-    return {
-      requestSid,
-      replyKind: "group",
-      replyId: replyGroupId,
-    };
-  }
-  if (!fromId) {
-    return null;
-  }
-  return {
-    requestSid,
-    replyKind: "user",
-    replyId: fromId,
-  };
-}
-
-function isCommandOuterMessage(
-  eventAny: Record<string, unknown>,
-  meta: Record<string, unknown>,
-): boolean {
-  const payload = (eventAny.payload ?? meta.payload) as Record<string, unknown> | undefined;
-  const rawTypeCandidates = [
-    eventAny.type,
-    meta.type,
-    payload?.type,
-    (eventAny as { messageType?: unknown }).messageType,
-    (meta as { messageType?: unknown }).messageType,
-  ];
-  return rawTypeCandidates.some((value) => String(value ?? "").trim().toLowerCase() === "command");
-}
-
-async function runGatewayCall(command: string, params: Record<string, unknown>): Promise<unknown> {
-  const runtime = getClawchatRuntime();
-  const argv = ["openclaw", "gateway", "call", command, "--params", JSON.stringify(params)];
-  logDebug("exec openclaw gateway call", {
-    command,
-    paramsKeys: Object.keys(params),
-  });
-  const result = await runtime.system.runCommandWithTimeout(argv, {
-    timeoutMs: 30_000,
-  });
-  const resultObj = asPlainObject(result);
-  const stdout =
-    typeof resultObj?.stdout === "string"
-      ? resultObj.stdout
-      : typeof resultObj?.output === "string"
-        ? resultObj.output
-        : typeof result === "string"
-          ? result
-          : "";
-  const stderr =
-    typeof resultObj?.stderr === "string"
-      ? resultObj.stderr
-      : typeof resultObj?.error === "string"
-        ? resultObj.error
-        : "";
-  const exitCode =
-    typeof resultObj?.exitCode === "number"
-      ? resultObj.exitCode
-      : typeof resultObj?.code === "number"
-        ? resultObj.code
-        : 0;
-  if (stderr.trim()) {
-    logWarn(`openclaw ${command} stderr`, stderr.trim());
-  }
-  if (exitCode !== 0) {
-    const combined = `${stdout}\n${stderr}`;
-    if (/pairing required/i.test(combined)) {
-      throw new Error(
-        "Gateway pairing required for config updates. Run `openclaw devices list` and approve the pending operator request.",
-      );
-    }
-    throw new Error(`openclaw gateway call ${command} failed with exit code ${exitCode}`);
-  }
-  const parsed = parseJsonFromMixedText(stdout);
-  const stdoutTrimmed = stdout.trim();
-  const stdoutNoAnsi = stripAnsi(stdout);
-  logDebug("openclaw gateway call completed", {
-    command,
-    stdoutBytes: Buffer.byteLength(stdout, "utf8"),
-    stdoutSha1: createHash("sha1").update(stdout).digest("hex").slice(0, 12),
-    parsedAsJson: parsed !== null,
-    parsedType:
-      parsed === null ? "null" : Array.isArray(parsed) ? "array" : typeof parsed,
-    parsedKeys:
-      parsed && typeof parsed === "object" && !Array.isArray(parsed)
-        ? Object.keys(parsed as Record<string, unknown>).slice(0, 20)
-        : [],
-    containsBaseHashToken: /base[_-]?hash/i.test(stdoutNoAnsi),
-  });
-  return parsed ?? stdoutTrimmed;
-}
-
-function findBaseHash(value: unknown): string {
-  if (!value) {
-    return "";
-  }
-  if (typeof value === "string") {
-    const parsed = parseJsonFromMixedText(value);
-    if (parsed !== null) {
-      return findBaseHash(parsed);
-    }
-    const text = stripAnsi(value);
-    const regexes = [
-      /"baseHash"\s*:\s*"([^"]+)"/i,
-      /"base_hash"\s*:\s*"([^"]+)"/i,
-      /\bbaseHash\b\s*[:=]\s*["']?([A-Za-z0-9._:-]+)["']?/i,
-      /\bbase_hash\b\s*[:=]\s*["']?([A-Za-z0-9._:-]+)["']?/i,
-    ];
-    for (const re of regexes) {
-      const matched = text.match(re);
-      const candidate = matched?.[1]?.trim();
-      if (candidate) {
-        return candidate;
-      }
-    }
-    return "";
-  }
-  if (Array.isArray(value)) {
-    for (const item of value) {
-      const nested = findBaseHash(item);
-      if (nested) {
-        return nested;
-      }
-    }
-    return "";
-  }
-  if (typeof value !== "object") {
-    return "";
-  }
-
-  const obj = value as Record<string, unknown>;
-  const directCandidates = [
-    obj.baseHash,
-    obj.base_hash,
-    obj.hash,
-    obj.configHash,
-    obj.config_hash,
-  ];
-  for (const candidate of directCandidates) {
-    if (typeof candidate === "string" && candidate.trim()) {
-      return candidate.trim();
-    }
-  }
-  for (const nested of Object.values(obj)) {
-    const found = findBaseHash(nested);
-    if (found) {
-      return found;
-    }
-  }
-  return "";
-}
-
-function isHistoryEvent(eventAny: Record<string, unknown>, meta: Record<string, unknown>): boolean {
-  const isHistoryRaw = (eventAny.isHistory ?? meta.isHistory) as unknown;
-  return (
-    isHistoryRaw === true ||
-    isHistoryRaw === "true" ||
-    isHistoryRaw === 1 ||
-    isHistoryRaw === "1"
-  );
-}
-
-function collectHashCandidates(
-  value: unknown,
-  path = "$",
-  out: Array<{ path: string; value: string }> = [],
-): Array<{ path: string; value: string }> {
-  if (out.length >= 20 || value == null) {
-    return out;
-  }
-  if (Array.isArray(value)) {
-    for (let i = 0; i < value.length && out.length < 20; i += 1) {
-      collectHashCandidates(value[i], `${path}[${i}]`, out);
-    }
-    return out;
-  }
-  if (typeof value !== "object") {
-    return out;
-  }
-
-  const obj = value as Record<string, unknown>;
-  for (const [key, nested] of Object.entries(obj)) {
-    if (out.length >= 20) {
-      break;
-    }
-    const keyLower = key.toLowerCase();
-    if (keyLower.includes("hash") && typeof nested === "string" && nested.trim()) {
-      out.push({
-        path: `${path}.${key}`,
-        value: nested.trim().slice(0, 24),
-      });
-    }
-    collectHashCandidates(nested, `${path}.${key}`, out);
-  }
-  return out;
-}
-
-function extractText(event: ClawchatInboundEvent): string {
-  const eventAny = event as Record<string, unknown>;
-  const meta = (eventAny.meta ?? eventAny) as Record<string, unknown>;
-  const candidates: unknown[] = [
-    event.msg,
-    event.text,
-    event.content,
-    event.payload?.msg,
-    event.payload?.text,
-    event.payload?.content,
-    (event as { body?: unknown }).body,
-    (event as { message?: unknown }).message,
-    (event as { data?: unknown }).data,
-    meta.content,
-    (meta.payload as Record<string, unknown> | undefined)?.content,
-    (meta.payload as Record<string, unknown> | undefined)?.text,
-  ];
-
-  for (const item of candidates) {
-    if (item == null) {
-      continue;
-    }
-    if (typeof item === "string") {
-      const trimmed = item.trim();
-      if (!trimmed) {
-        continue;
-      }
-      if (trimmed.startsWith("{") || trimmed.startsWith("[")) {
-        try {
-          const parsed = JSON.parse(trimmed) as Record<string, unknown>;
-          const parsedText = [parsed.msg, parsed.text, parsed.content].find(
-            (x) => typeof x === "string" && x.trim().length > 0,
-          );
-          if (typeof parsedText === "string") {
-            return parsedText;
-          }
-        } catch {
-          // Keep raw string fallback.
-        }
-      }
-      return trimmed;
-    }
-      if (typeof item === "object") {
-      const asObj = item as Record<string, unknown>;
-      const nested = [asObj.msg, asObj.text, asObj.content].find(
-        (x) => typeof x === "string" && x.trim().length > 0,
-      );
-      if (typeof nested === "string") {
-        return nested;
-      }
-    }
-  }
-
-  return "";
-}
-
-function normalizeAllowEntry(raw: unknown): string {
-  return String(raw ?? "")
-    .replace(/^(?:clawchat|lanying):/i, "")
-    .trim()
-    .toLowerCase();
-}
-
-function isAllowedByAllowlist(allowlist: string[], candidate: string): boolean {
-  if (allowlist.includes("*")) {
-    return true;
-  }
-  const normalized = normalizeAllowEntry(candidate);
-  if (!normalized) {
-    return false;
-  }
-  return allowlist.some((entry) => normalizeAllowEntry(entry) === normalized);
-}
-
-function parseGroupId(
-  eventAny: Record<string, unknown>,
-  meta: Record<string, unknown>,
-  event: ClawchatInboundEvent,
-): string {
-  const toType =
-    String(
-      (eventAny as { toType?: unknown }).toType ??
-        (eventAny as { to_type?: unknown }).to_type ??
-        (meta as { toType?: unknown }).toType ??
-        (meta as { to_type?: unknown }).to_type ??
-        "",
-    )
-      .trim()
-      .toLowerCase() || "";
-  const isGroupToType = toType === "group";
-  const groupIdByTo =
-    pickId(event.to) ||
-    pickId((eventAny as { to?: unknown }).to) ||
-    pickId((meta as { to?: unknown }).to);
-
-  if (isGroupToType && groupIdByTo) {
-    return groupIdByTo;
-  }
-
-  return (
-    pickId(event.gid) ||
-    pickId(event.group_id) ||
-    pickId(event.conversation_id) ||
-    pickId(eventAny.gid) ||
-    pickId((eventAny as { group_id?: unknown }).group_id) ||
-    pickId((eventAny as { conversation_id?: unknown }).conversation_id) ||
-    pickId(meta.gid) ||
-    pickId((meta as { group_id?: unknown }).group_id) ||
-    pickId((meta as { conversation_id?: unknown }).conversation_id) ||
-    groupIdByTo
-  );
-}
-
-function getGroupEntry(
-  account: ResolvedClawchatAccount,
-  groupId: string,
-): { entry?: ResolvedClawchatAccount["groups"][string]; source: "group" | "wildcard" | "none" } {
-  const groupEntry = account.groups[groupId];
-  if (groupEntry) {
-    return { entry: groupEntry, source: "group" };
-  }
-  const wildcard = account.groups["*"];
-  if (wildcard) {
-    return { entry: wildcard, source: "wildcard" };
-  }
-  return { source: "none" };
-}
-
-function isGroupAllowedByPolicy(account: ResolvedClawchatAccount, groupId: string): boolean {
-  if (account.groupPolicy === "disabled") {
-    return false;
-  }
-  const matched = getGroupEntry(account, groupId);
-  if (matched.entry?.enabled === false) {
-    return false;
-  }
-  if (account.groupPolicy === "open") {
-    return true;
-  }
-  return matched.source !== "none";
-}
-
-function isGroupSenderAllowed(
-  account: ResolvedClawchatAccount,
-  groupId: string,
-  senderId: string,
-): boolean {
-  if (!senderId) {
-    return false;
-  }
-  const matched = getGroupEntry(account, groupId);
-  const senderAllowFrom =
-    matched.entry && matched.entry.allowFrom.length > 0
-      ? matched.entry.allowFrom
-      : account.groupAllowFrom;
-  if (senderAllowFrom.length === 0) {
-    return false;
-  }
-  return isAllowedByAllowlist(senderAllowFrom, senderId);
-}
-
-function resolveGroupRequireMention(account: ResolvedClawchatAccount, groupId: string): boolean {
-  const groupEntry = account.groups[groupId];
-  if (typeof groupEntry?.requireMention === "boolean") {
-    return groupEntry.requireMention;
-  }
-  const wildcardEntry = account.groups["*"];
-  if (typeof wildcardEntry?.requireMention === "boolean") {
-    return wildcardEntry.requireMention;
-  }
-  return true;
-}
-
 function hasMentionHint(
   _body: string,
   selfId: string,
@@ -1164,147 +340,6 @@ function hasMentionHint(
     return true;
   }
   return false;
-}
-
-function resolveSenderNameFromConfig(
-  eventAny: Record<string, unknown>,
-  meta: Record<string, unknown>,
-): string {
-  const payload = (eventAny.payload ?? meta.payload) as Record<string, unknown> | undefined;
-  const configCandidates = [
-    parseConfigValue((eventAny as { config?: unknown }).config),
-    parseConfigValue((meta as { config?: unknown }).config),
-    parseConfigValue(payload?.config),
-  ].filter(Boolean) as Record<string, unknown>[];
-  for (const config of configCandidates) {
-    const nickname = (config.senderNickname ?? config.sender_nickname) as unknown;
-    if (typeof nickname === "string" && nickname.trim()) {
-      return nickname.trim();
-    }
-  }
-  return "";
-}
-
-function normalizeTarget(raw: string): ClawchatMessageTarget | null {
-  const trimmed = raw.trim();
-  if (!trimmed) {
-    return null;
-  }
-
-  const normalized = trimmed.replace(/^(?:clawchat|lanying):/i, "");
-  if (/^(group|g):/i.test(normalized)) {
-    return { kind: "group", id: normalized.replace(/^(group|g):/i, "").trim() };
-  }
-  if (/^(user|u):/i.test(normalized)) {
-    return { kind: "user", id: normalized.replace(/^(user|u):/i, "").trim() };
-  }
-  return { kind: "user", id: normalized };
-}
-
-function sanitizeAccountForLog(account: ResolvedClawchatAccount): Record<string, unknown> {
-  return {
-    accountId: account.accountId,
-    enabled: account.enabled,
-    configured: account.configured,
-    appId: account.appId ? `${account.appId.slice(0, 4)}***` : "",
-    username: account.username,
-    dmPolicy: account.dmPolicy,
-    allowFromCount: account.allowFrom.length,
-    groupPolicy: account.groupPolicy,
-    groupAllowFromCount: account.groupAllowFrom.length,
-    groupsCount: Object.keys(account.groups).length,
-  };
-}
-
-function resolveClawchatConfig(cfg: OpenClawConfig): ClawchatChannelConfig {
-  const channels = cfg?.channels as Record<string, unknown> | undefined;
-  const primary = channels?.[CLAWCHAT_CHANNEL_ID];
-  if (primary && typeof primary === "object") {
-    return primary as ClawchatChannelConfig;
-  }
-  const legacy = channels?.[CLAWCHAT_LEGACY_CHANNEL_ID];
-  if (legacy && typeof legacy === "object") {
-    return legacy as ClawchatChannelConfig;
-  }
-  return {};
-}
-
-function resolveClawchatAccount(cfg: OpenClawConfig): ResolvedClawchatAccount {
-  const channels = cfg?.channels as Record<string, unknown> | undefined;
-  const usingPrimary = Boolean(
-    channels?.[CLAWCHAT_CHANNEL_ID] && typeof channels[CLAWCHAT_CHANNEL_ID] === "object",
-  );
-  const channelCfg = resolveClawchatConfig(cfg);
-  const appIdRaw = channelCfg.appId ?? channelCfg.app_id ?? "";
-  const usernameRaw = channelCfg.username ?? "";
-  const passwordRaw = channelCfg.password ?? "";
-
-  const appId = String(appIdRaw).trim();
-  const username = String(usernameRaw).trim();
-  const password = String(passwordRaw).trim();
-  const hasCredentials = Boolean(appId && username && password);
-  const enabledFlag =
-    typeof channelCfg.enabled === "boolean"
-      ? channelCfg.enabled
-      : typeof channelCfg.enable === "boolean"
-        ? channelCfg.enable
-        : false;
-  const enabled = enabledFlag === true;
-  const dmPolicy = channelCfg.dmPolicy ?? "pairing";
-  const parsedAllowFrom = (channelCfg.allowFrom ?? [])
-    .map((entry) => String(entry).trim())
-    .filter(Boolean);
-  const allowFrom = dmPolicy === "open" && parsedAllowFrom.length === 0 ? ["*"] : parsedAllowFrom;
-  const rawGroupPolicy = String(channelCfg.groupPolicy ?? "disabled").trim().toLowerCase();
-  const groupPolicy: ResolvedClawchatAccount["groupPolicy"] =
-    rawGroupPolicy === "open" || rawGroupPolicy === "disabled" || rawGroupPolicy === "allowlist"
-      ? rawGroupPolicy
-      : "allowlist";
-  const groupAllowFrom = (channelCfg.groupAllowFrom ?? [])
-    .map((entry) => String(entry).trim())
-    .filter(Boolean);
-  const groupsRaw = channelCfg.groups;
-  const groups: ResolvedClawchatAccount["groups"] = {};
-  if (groupsRaw && typeof groupsRaw === "object" && !Array.isArray(groupsRaw)) {
-    for (const [groupIdRaw, value] of Object.entries(groupsRaw)) {
-      const groupId = String(groupIdRaw).trim();
-      if (!groupId || !value || typeof value !== "object" || Array.isArray(value)) {
-        continue;
-      }
-      const groupObj = value as {
-        requireMention?: unknown;
-        enabled?: unknown;
-        allowFrom?: unknown;
-      };
-      const allowFrom = Array.isArray(groupObj.allowFrom)
-        ? groupObj.allowFrom.map((entry) => String(entry).trim()).filter(Boolean)
-        : [];
-      groups[groupId] = {
-        requireMention:
-          typeof groupObj.requireMention === "boolean" ? groupObj.requireMention : undefined,
-        enabled: typeof groupObj.enabled === "boolean" ? groupObj.enabled : undefined,
-        allowFrom,
-      };
-    }
-  }
-
-  return {
-    accountId: CLAWCHAT_DEFAULT_ACCOUNT_ID,
-    enabled,
-    configured: Boolean(enabled && hasCredentials),
-    configKey: usingPrimary ? CLAWCHAT_CHANNEL_ID : CLAWCHAT_LEGACY_CHANNEL_ID,
-    usesLegacyConfig: !usingPrimary && Boolean(channels?.[CLAWCHAT_LEGACY_CHANNEL_ID]),
-    appId,
-    username,
-    password,
-    allowManage: channelCfg.allowManage === true,
-    dmPolicy,
-    allowFrom,
-    groupPolicy,
-    groupAllowFrom,
-    groups,
-    defaultTo: channelCfg.defaultTo?.trim() || undefined,
-  };
 }
 
 class ClawchatSession {
@@ -1726,8 +761,8 @@ class ClawchatSession {
       chatbotName: params.chatbotName,
       prompt: params.prompt,
     });
-    mkdirSync(location.managedDir, { recursive: true });
-    writeFileSync(location.managedFile, content, "utf8");
+    fs.mkdirSync(location.managedDir, { recursive: true });
+    writeUtf8FileSync(location.managedFile, content);
     logDebug("managed AGENTS.md updated", {
       chatbotId: params.chatbotId,
       chatbotName: params.chatbotName,
