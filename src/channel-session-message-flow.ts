@@ -1,0 +1,868 @@
+import { logDebug, logError, logWarn } from "./logging.js";
+import {
+  extractConfigPatchRaw,
+  extractPresetPromptSync,
+  extractRouterSignal,
+  extractText,
+  isCommandOuterMessage,
+  isHistoryEvent,
+  removeOpenclawEdgeMention,
+  resolveRouterReplyTargetSnapshot,
+  type PresetPromptSyncPayload,
+  type RouterReplyTargetSnapshot,
+} from "./channel-message.js";
+import {
+  hasSelfMentionInConfig,
+  isGroupAllowedByPolicy,
+  isGroupSenderAllowed,
+  parseGroupId,
+  resolveGroupRequireMention,
+  resolveSenderNameFromConfig,
+  resolveToUserNicknameFromConfig,
+} from "./channel-config.js";
+import {
+  CLAWCHAT_CHANNEL_ID,
+  type ClawchatInboundEvent,
+  type ClawchatMessageTarget,
+  type OpenClawConfig,
+  type ResolvedClawchatAccount,
+} from "./types.js";
+import { pickId } from "./utils.js";
+
+const GROUP_CONTEXT_MAX_MESSAGES = 30;
+const GROUP_CONTEXT_MAX_CHARS = 6_000;
+
+type PendingGroupContextEntry = {
+  senderId: string;
+  senderName?: string;
+  body: string;
+  timestamp: number;
+};
+
+type RouterGroupQueueEntry = {
+  tail: Promise<void>;
+  pending: number;
+};
+
+type DispatcherOptions = {
+  deliver: (payload: { text?: string; body?: string }) => Promise<void>;
+  onError: (err: unknown, info: { kind: "tool" | "block" | "final" }) => void;
+  onSkip: (
+    payload: { text?: string; body?: string },
+    info: { kind: "tool" | "block" | "final"; reason: string },
+  ) => void;
+};
+
+type MessageFlowContext = {
+  getSelfId: () => string;
+  updateSelfIdFromClient: (reason: string) => void;
+  getReadOnlyClient: () => { rosterManage?: { readRosterMessage: (rosterId: number, mid?: number | string) => unknown } } | null;
+  loadConfig: () => Promise<OpenClawConfig>;
+  dispatchReplyWithBufferedBlockDispatcher: (params: {
+    ctx: Record<string, unknown>;
+    cfg: OpenClawConfig;
+    dispatcherOptions: DispatcherOptions;
+  }) => Promise<unknown>;
+  sendRouterReplyToSelf: (message: Record<string, unknown>) => Promise<void>;
+  sendConfigPatchMarkerToSelf: (params: { stage: "before" | "after"; rawPatch: string }) => Promise<void>;
+  sendPresetPromptSyncMarkerToSelf: (params: {
+    stage: "before" | "after";
+    chatbotId: string;
+    chatbotName: string;
+    prompt: string;
+  }) => Promise<void>;
+  applyOpenClawConfigPatch: (rawPatch: string) => Promise<void>;
+  handlePresetPromptSync: (params: {
+    cfg: OpenClawConfig;
+    chatbotId: string;
+    chatbotName: string;
+    prompt: string;
+  }) => Promise<void>;
+  sendText: (
+    target: ClawchatMessageTarget,
+    text: string,
+    account?: ResolvedClawchatAccount,
+  ) => Promise<unknown>;
+  pendingGroupContext: Map<string, PendingGroupContextEntry[]>;
+  routerGroupQueueByGroupId: Map<string, RouterGroupQueueEntry>;
+};
+
+function pickNumberId(value: unknown): number | null {
+  if (typeof value === "number" && Number.isFinite(value)) {
+    return Math.trunc(value);
+  }
+  if (typeof value === "string") {
+    const trimmed = value.trim();
+    if (!trimmed) {
+      return null;
+    }
+    const parsed = Number(trimmed);
+    if (Number.isFinite(parsed)) {
+      return Math.trunc(parsed);
+    }
+  }
+  if (value && typeof value === "object") {
+    const nested = pickNumberId((value as { id?: unknown }).id);
+    if (nested !== null) {
+      return nested;
+    }
+    return pickNumberId((value as { uid?: unknown }).uid);
+  }
+  return null;
+}
+
+function hasMentionHint(
+  selfId: string,
+  eventAny: Record<string, unknown>,
+  meta: Record<string, unknown>,
+  eventName?: string,
+): boolean {
+  if (hasSelfMentionInConfig(eventAny, meta, selfId)) {
+    return true;
+  }
+  if (eventName === "onMentionMessage") {
+    return true;
+  }
+  return false;
+}
+
+export function createClawchatSessionMessageFlow(ctx: MessageFlowContext) {
+  function appendPendingGroupContext(params: {
+    groupId: string;
+    senderId: string;
+    senderName?: string;
+    body: string;
+    timestamp: number;
+  }): void {
+    const current = ctx.pendingGroupContext.get(params.groupId) ?? [];
+    current.push({
+      senderId: params.senderId,
+      senderName: params.senderName,
+      body: params.body,
+      timestamp: params.timestamp,
+    });
+    while (current.length > GROUP_CONTEXT_MAX_MESSAGES) {
+      current.shift();
+    }
+    let totalChars = current.reduce((acc, item) => acc + item.body.length, 0);
+    while (current.length > 0 && totalChars > GROUP_CONTEXT_MAX_CHARS) {
+      const removed = current.shift();
+      totalChars -= removed?.body.length ?? 0;
+    }
+    ctx.pendingGroupContext.set(params.groupId, current);
+  }
+
+  function consumePendingGroupContext(groupId: string): string {
+    const pending = ctx.pendingGroupContext.get(groupId) ?? [];
+    if (pending.length === 0) {
+      return "";
+    }
+    ctx.pendingGroupContext.delete(groupId);
+    const lines = pending.map((item) => {
+      const speaker = item.senderName?.trim() || item.senderId;
+      return `[${speaker}] ${item.body}`;
+    });
+    return `[Group context messages since last trigger]\n${lines.join("\n")}`;
+  }
+
+  function buildBodyWithPendingGroupContext(
+    groupId: string,
+    body: string,
+    isSlashCommand: boolean,
+  ): string {
+    if (isSlashCommand) {
+      return body;
+    }
+    const pendingContext = consumePendingGroupContext(groupId);
+    if (!pendingContext) {
+      return body;
+    }
+    const contextBytes = Buffer.byteLength(pendingContext, "utf8");
+    const contextPreview = Buffer.from(pendingContext, "utf8").subarray(0, 4096).toString("utf8");
+    logDebug("group pending context attached", {
+      groupId,
+      contextBytes,
+      contextPreview,
+      contextPreviewTruncated: contextBytes > 4096,
+    });
+    return `${pendingContext}\n\n[Current message]\n${body}`;
+  }
+
+  async function handleRouterContext(
+    routerMessage: Record<string, unknown>,
+    requestSid: string,
+    groupId: string,
+  ): Promise<void> {
+    const body = extractText(routerMessage as ClawchatInboundEvent);
+    const trimmedGroupId = groupId.trim();
+    if (!trimmedGroupId) {
+      logWarn("skip router_context: groupId missing", {
+        requestSid,
+        keys: Object.keys(routerMessage),
+      });
+      return;
+    }
+    const fromId =
+      pickId(routerMessage.from) ||
+      pickId((routerMessage as { sender_id?: unknown }).sender_id) ||
+      "";
+    const timestampNum = Number(
+      (routerMessage as { timestamp?: unknown }).timestamp ??
+        (routerMessage as { ts?: unknown }).ts ??
+        Date.now(),
+    );
+    const routerMeta = routerMessage as Record<string, unknown>;
+    const cleanedBody = removeOpenclawEdgeMention(
+      body,
+      resolveToUserNicknameFromConfig(routerMeta, routerMeta),
+    ).trim();
+    if (!cleanedBody) {
+      logDebug("skip router_context: empty body after cleanup", {
+        requestSid,
+        groupId: trimmedGroupId,
+      });
+      return;
+    }
+    appendPendingGroupContext({
+      groupId: trimmedGroupId,
+      senderId: fromId || trimmedGroupId,
+      senderName: resolveSenderNameFromConfig(routerMeta, routerMeta) || undefined,
+      body: cleanedBody,
+      timestamp: Number.isFinite(timestampNum) ? timestampNum : Date.now(),
+    });
+    logDebug("router_context stored in pending group context", {
+      requestSid,
+      groupId: trimmedGroupId,
+      senderId: fromId || undefined,
+      bodyPreview: cleanedBody.slice(0, 80),
+    });
+  }
+
+  async function runRouterSignalInGroupQueue(params: {
+    groupId: string;
+    requestSid: string;
+    run: () => Promise<void>;
+  }): Promise<void> {
+    const groupId = params.groupId.trim();
+    if (!groupId) {
+      await params.run();
+      return;
+    }
+    let queueEntry = ctx.routerGroupQueueByGroupId.get(groupId);
+    if (!queueEntry) {
+      queueEntry = {
+        tail: Promise.resolve(),
+        pending: 0,
+      };
+      ctx.routerGroupQueueByGroupId.set(groupId, queueEntry);
+    }
+    queueEntry.pending += 1;
+    logDebug("router_signal group queue enqueue", {
+      groupId,
+      requestSid: params.requestSid || undefined,
+      queueLength: queueEntry.pending,
+    });
+    const runQueued = async () => {
+      logDebug("router_signal group queue start", {
+        groupId,
+        requestSid: params.requestSid || undefined,
+        queueLength: queueEntry.pending,
+      });
+      try {
+        await params.run();
+      } finally {
+        queueEntry.pending = Math.max(0, queueEntry.pending - 1);
+        const queueLength = queueEntry.pending;
+        if (queueLength === 0 && ctx.routerGroupQueueByGroupId.get(groupId) === queueEntry) {
+          ctx.routerGroupQueueByGroupId.delete(groupId);
+        }
+        logDebug("router_signal group queue dequeue", {
+          groupId,
+          requestSid: params.requestSid || undefined,
+          queueLength,
+        });
+      }
+    };
+    const queued = queueEntry.tail.then(runQueued, runQueued);
+    queueEntry.tail = queued.catch(() => undefined);
+    await queued;
+  }
+
+  async function handleRouterRequest(
+    routerMessage: Record<string, unknown>,
+    account: ResolvedClawchatAccount,
+    knowledge = "",
+    replyTargetSnapshot?: RouterReplyTargetSnapshot,
+  ): Promise<void> {
+    if (!replyTargetSnapshot) {
+      logError("skip router_request: reply target snapshot missing", {
+        keys: Object.keys(routerMessage),
+      });
+      return;
+    }
+    const body = extractText(routerMessage as ClawchatInboundEvent);
+    if (!body.trim()) {
+      logWarn("skip router_request: message.content is empty", {
+        keys: Object.keys(routerMessage),
+      });
+      return;
+    }
+    const selfId = ctx.getSelfId();
+    const fromId =
+      pickId(routerMessage.from) ||
+      pickId((routerMessage as { sender_id?: unknown }).sender_id) ||
+      selfId;
+    const toId =
+      pickId(routerMessage.to) ||
+      pickId((routerMessage as { uid?: unknown }).uid) ||
+      selfId;
+    const messageSid =
+      pickId(routerMessage.id) || pickId((routerMessage as { message_id?: unknown }).message_id);
+    const timestampNum = Number(
+      (routerMessage as { timestamp?: unknown }).timestamp ??
+        (routerMessage as { ts?: unknown }).ts ??
+        Date.now(),
+    );
+    const routerRelayMark = true;
+    const cfg = await ctx.loadConfig();
+    const routerMeta = routerMessage as Record<string, unknown>;
+    const toUserNickname = resolveToUserNicknameFromConfig(routerMeta, routerMeta);
+    const cleanedBody = removeOpenclawEdgeMention(body, toUserNickname);
+    const trimmedBody = cleanedBody.trim();
+    const isSlashCommand = trimmedBody.startsWith("/");
+    const replyTo = replyTargetSnapshot.replyId;
+    const bodyToDispatch =
+      replyTargetSnapshot.replyKind === "group"
+        ? buildBodyWithPendingGroupContext(replyTo, cleanedBody, isSlashCommand)
+        : cleanedBody;
+    const bodyWithKnowledge =
+      knowledge.trim().length > 0
+        ? [
+            "[Retrieved knowledge context]",
+            knowledge.trim(),
+            "[End knowledge context]",
+            "",
+            bodyToDispatch,
+          ].join("\n")
+        : bodyToDispatch;
+    let replySeq = 0;
+    let deliveredCount = 0;
+    const replyFrom = selfId || toId || fromId;
+    const replyToType = replyTargetSnapshot.replyKind === "group" ? "group" : "roster";
+    const dispatchTo = replyTargetSnapshot.replyKind === "group" ? replyTo : toId || selfId;
+    const sessionKey =
+      replyTargetSnapshot.replyKind === "group"
+        ? `router:group:${replyTo}`
+        : `router:direct:${fromId || toId || selfId || CLAWCHAT_CHANNEL_ID}`;
+    logDebug("router_request target resolved", {
+      requestSid: replyTargetSnapshot.requestSid,
+      replyKind: replyTargetSnapshot.replyKind,
+      replyId: replyTo,
+      resolvedBy: "snapshot",
+      fromId: fromId || undefined,
+      toId: toId || undefined,
+    });
+
+    const result = await ctx.dispatchReplyWithBufferedBlockDispatcher({
+      ctx: {
+        Body: bodyWithKnowledge,
+        BodyForAgent: bodyWithKnowledge,
+        CommandBody: cleanedBody,
+        BodyForCommands: cleanedBody,
+        CommandAuthorized: isSlashCommand,
+        From: fromId || toId || selfId,
+        To: dispatchTo,
+        SessionKey: sessionKey,
+        RouterRelay: routerRelayMark,
+        AccountId: account.accountId,
+        MessageSid: messageSid || undefined,
+        Timestamp: Number.isFinite(timestampNum) ? timestampNum : Date.now(),
+        OriginatingChannel: CLAWCHAT_CHANNEL_ID as any,
+        OriginatingTo: replyTo,
+        ChatType: replyTargetSnapshot.replyKind === "group" ? "group" : "direct",
+        Provider: CLAWCHAT_CHANNEL_ID,
+        Surface: CLAWCHAT_CHANNEL_ID,
+        SenderId: fromId || undefined,
+        SenderName: fromId || undefined,
+      },
+      cfg,
+      dispatcherOptions: {
+        deliver: async (payload: { text?: string; body?: string }) => {
+          const response = (payload?.text ?? payload?.body ?? "").trim();
+          if (!response) {
+            return;
+          }
+          replySeq += 1;
+          const now = Date.now();
+          const replyMessage: Record<string, unknown> = {
+            id: `router_reply_${now}_${replySeq}`,
+            from: replyFrom,
+            to: replyTo,
+            content: response,
+            type: "text",
+            ext: "",
+            config: "",
+            attach: "",
+            status: 1,
+            timestamp: String(now),
+            toType: replyToType,
+          };
+          await ctx.sendRouterReplyToSelf(replyMessage);
+          deliveredCount += 1;
+        },
+        onError: (err: unknown, info: { kind: "tool" | "block" | "final" }) => {
+          logError(`router_request dispatcher failed (kind=${info.kind})`, err);
+        },
+        onSkip: (
+          payload: { text?: string; body?: string },
+          info: { kind: "tool" | "block" | "final"; reason: string },
+        ) => {
+          logDebug(
+            `router_request dispatcher skipped payload (kind=${info.kind}, reason=${info.reason})`,
+            {
+              textPreview: (payload.text ?? payload.body ?? "").slice(0, 80),
+            },
+          );
+        },
+      },
+    });
+    logDebug("router_request dispatcher result", result);
+    if (deliveredCount === 0) {
+      logDebug("router_request produced empty replies; no router_reply sent");
+      return;
+    }
+    logDebug("router_reply stream sent for router_request", {
+      requestSid: replyTargetSnapshot.requestSid,
+      requestFrom: fromId || undefined,
+      replyTo: selfId,
+      deliveredCount,
+    });
+  }
+
+  async function onInbound(
+    event: ClawchatInboundEvent,
+    mode: "direct" | "group",
+    account: ResolvedClawchatAccount,
+    eventName?: string,
+  ): Promise<void> {
+    try {
+      const eventAny = event as Record<string, unknown>;
+      const meta = (eventAny.meta ?? eventAny) as Record<string, unknown>;
+      const isHistory = isHistoryEvent(eventAny, meta);
+      if (isHistory) {
+        logDebug("skip history inbound event", {
+          mode,
+          id: pickId(eventAny.id ?? meta.id),
+        });
+        return;
+      }
+      const senderId =
+        pickId(event.from) ||
+        pickId(event.sender_id) ||
+        pickId((event as { sender?: unknown }).sender) ||
+        pickId((event as { uid?: unknown }).uid) ||
+        pickId(meta.from);
+      const toIdRaw =
+        pickId(event.to) ||
+        pickId((event as { to_id?: unknown }).to_id) ||
+        pickId(meta.to) ||
+        pickId(meta.uid) ||
+        pickId(meta.xid);
+      const groupId = parseGroupId(eventAny, meta, event);
+      const directPeer =
+        pickId(event.from) ||
+        pickId((event as { to_id?: unknown }).to_id) ||
+        pickId((event as { xid?: unknown }).xid) ||
+        toIdRaw;
+      const targetId = mode === "group" ? groupId : directPeer;
+      if (!targetId) {
+        logWarn("inbound message missing target id", {
+          mode,
+          eventName,
+          senderId,
+          toId: toIdRaw,
+          groupId,
+          event,
+        });
+        return;
+      }
+      ctx.updateSelfIdFromClient("inbound event");
+      const selfId = ctx.getSelfId();
+      const configPatchRaw = extractConfigPatchRaw(eventAny, meta);
+      const presetPromptSync = extractPresetPromptSync(eventAny, meta);
+      const routerSignal = extractRouterSignal(eventAny, meta);
+      if (mode === "direct" && senderId && toIdRaw && senderId === toIdRaw) {
+        const isSelfLoopback = Boolean(selfId && senderId === selfId);
+        if (isSelfLoopback && account.allowManage && configPatchRaw) {
+          try {
+            await ctx.sendConfigPatchMarkerToSelf({
+              stage: "before",
+              rawPatch: configPatchRaw,
+            });
+            await ctx.applyOpenClawConfigPatch(configPatchRaw);
+            await ctx.sendConfigPatchMarkerToSelf({
+              stage: "after",
+              rawPatch: configPatchRaw,
+            });
+            logDebug("applied config patch from self loopback message", {
+              senderId,
+              toId: toIdRaw,
+              patchBytes: Buffer.byteLength(configPatchRaw, "utf8"),
+            });
+          } catch (err) {
+            logError("failed to apply config patch from self loopback message", {
+              err,
+              senderId,
+              toId: toIdRaw,
+              selfId,
+              allowManage: account.allowManage,
+              hasConfigPatch: Boolean(configPatchRaw),
+              patchBytes: Buffer.byteLength(configPatchRaw, "utf8"),
+            });
+          }
+          return;
+        }
+        if (isSelfLoopback && account.allowManage && presetPromptSync) {
+          if (!isCommandOuterMessage(eventAny, meta)) {
+            logDebug("skip loopback preset_prompt_sync: outer type is not command", {
+              senderId,
+              toId: toIdRaw,
+              selfId,
+            });
+            return;
+          }
+          try {
+            const cfg = await ctx.loadConfig();
+            await ctx.sendPresetPromptSyncMarkerToSelf({
+              stage: "before",
+              chatbotId: presetPromptSync.chatbotId,
+              chatbotName: presetPromptSync.chatbotName,
+              prompt: presetPromptSync.prompt,
+            });
+            await ctx.handlePresetPromptSync({
+              cfg,
+              chatbotId: presetPromptSync.chatbotId,
+              chatbotName: presetPromptSync.chatbotName,
+              prompt: presetPromptSync.prompt,
+            });
+            await ctx.sendPresetPromptSyncMarkerToSelf({
+              stage: "after",
+              chatbotId: presetPromptSync.chatbotId,
+              chatbotName: presetPromptSync.chatbotName,
+              prompt: presetPromptSync.prompt,
+            });
+            logDebug("processed preset_prompt_sync from self loopback message", {
+              senderId,
+              toId: toIdRaw,
+              chatbotId: presetPromptSync.chatbotId,
+              promptBytes: Buffer.byteLength(presetPromptSync.prompt, "utf8"),
+            });
+          } catch (err) {
+            logError("failed to process preset_prompt_sync from self loopback message", {
+              err,
+              senderId,
+              toId: toIdRaw,
+              selfId,
+              chatbotId: presetPromptSync.chatbotId,
+              promptBytes: Buffer.byteLength(presetPromptSync.prompt, "utf8"),
+            });
+          }
+          return;
+        }
+        if (routerSignal?.type === "router_reply") {
+          logDebug("skip loopback router_reply", {
+            senderId,
+            toId: toIdRaw,
+            selfId,
+          });
+          return;
+        }
+        if (
+          isSelfLoopback &&
+          account.allowManage &&
+          (routerSignal?.type === "router_request" || routerSignal?.type === "router_context")
+        ) {
+          if (!isCommandOuterMessage(eventAny, meta)) {
+            logDebug("skip loopback router signal: outer type is not command", {
+              senderId,
+              toId: toIdRaw,
+              selfId,
+              routerSignalType: routerSignal.type,
+            });
+            return;
+          }
+          logDebug("processing loopback router signal", {
+            senderId,
+            toId: toIdRaw,
+            selfId,
+            routerSignalType: routerSignal.type,
+            knowledgeBytes: Buffer.byteLength(routerSignal.knowledge ?? "", "utf8"),
+          });
+          const requestSid =
+            pickId(routerSignal.message.id) ||
+            pickId((routerSignal.message as { message_id?: unknown }).message_id) ||
+            "";
+          const routerChatType = String(
+            (routerSignal.message as { toType?: unknown }).toType ??
+              (routerSignal.message as { to_type?: unknown }).to_type ??
+              "",
+          )
+            .trim()
+            .toLowerCase();
+          const routerGroupId =
+            routerChatType === "group"
+              ? pickId(routerSignal.message.to) ||
+                pickId((routerSignal.message as { group_id?: unknown }).group_id) ||
+                ""
+              : "";
+          if (routerSignal.type === "router_context") {
+            if (!routerGroupId) {
+              logWarn("skip router_context: group target missing", {
+                outerEventId: pickId(eventAny.id ?? meta.id) || undefined,
+                requestSid: requestSid || undefined,
+                routerMessageKeys: Object.keys(routerSignal.message),
+              });
+              return;
+            }
+            await runRouterSignalInGroupQueue({
+              groupId: routerGroupId,
+              requestSid,
+              run: () => handleRouterContext(routerSignal.message, requestSid, routerGroupId),
+            });
+            return;
+          }
+          const replyTargetSnapshot = resolveRouterReplyTargetSnapshot(routerSignal.message);
+          if (!replyTargetSnapshot) {
+            logError("skip router_request: failed to resolve reply target snapshot", {
+              outerEventId: pickId(eventAny.id ?? meta.id) || undefined,
+              routerMessageKeys: Object.keys(routerSignal.message),
+            });
+            return;
+          }
+          if (replyTargetSnapshot.replyKind === "group") {
+            await runRouterSignalInGroupQueue({
+              groupId: replyTargetSnapshot.replyId,
+              requestSid: replyTargetSnapshot.requestSid,
+              run: () =>
+                handleRouterRequest(
+                  routerSignal.message,
+                  account,
+                  routerSignal.knowledge,
+                  replyTargetSnapshot,
+                ),
+            });
+            return;
+          }
+          await handleRouterRequest(
+            routerSignal.message,
+            account,
+            routerSignal.knowledge,
+            replyTargetSnapshot,
+          );
+          return;
+        }
+        logDebug("skip loopback message (from === to)", {
+          senderId,
+          toId: toIdRaw,
+          selfId,
+          allowManage: account.allowManage,
+          hasConfigPatch: Boolean(configPatchRaw),
+          hasPresetPromptSync: Boolean(presetPromptSync),
+          routerSignalType: routerSignal?.type ?? "",
+        });
+        return;
+      }
+      if (senderId && selfId && senderId === selfId) {
+        logDebug("skip self/multi-device sync message", {
+          senderId,
+          toId: toIdRaw,
+          targetId,
+          mode,
+        });
+        return;
+      }
+
+      const body = extractText(event);
+      if (!body) {
+        logDebug("skip empty inbound", { mode, eventType: event.type });
+        return;
+      }
+      const toUserNickname = resolveToUserNicknameFromConfig(eventAny, meta);
+      const cleanedBody = removeOpenclawEdgeMention(body, toUserNickname);
+      const isSlashCommand = cleanedBody.startsWith("/");
+      const timestampNum = Number(
+        eventAny.timestamp ?? meta.timestamp ?? (eventAny as { ts?: unknown }).ts ?? Date.now(),
+      );
+
+      if (mode === "group") {
+        if (!isGroupAllowedByPolicy(account, groupId)) {
+          logDebug("skip group inbound by groupPolicy", {
+            groupPolicy: account.groupPolicy,
+            groupId,
+            eventName,
+          });
+          return;
+        }
+        if (!senderId) {
+          logWarn("skip group inbound: sender id missing", {
+            groupId,
+            eventName,
+          });
+          return;
+        }
+        if (!isGroupSenderAllowed(account, groupId, senderId)) {
+          logDebug("skip group inbound: sender not allowed", {
+            groupId,
+            senderId,
+            eventName,
+          });
+          return;
+        }
+        const requireMention = resolveGroupRequireMention(account, groupId);
+        if (!hasMentionHint(selfId, eventAny, meta, eventName) && requireMention) {
+          appendPendingGroupContext({
+            groupId,
+            senderId,
+            senderName: resolveSenderNameFromConfig(eventAny, meta) || undefined,
+            body: cleanedBody,
+            timestamp: Number.isFinite(timestampNum) ? timestampNum : Date.now(),
+          });
+          logDebug("skip group inbound: mention required", {
+            groupId,
+            senderId,
+            eventName,
+            requireMention,
+            queuedAsContext: true,
+          });
+          return;
+        }
+      }
+
+      logDebug("inbound message", {
+        mode,
+        eventName,
+        groupId: mode === "group" ? groupId : undefined,
+        senderId,
+        toId: toIdRaw,
+        targetId,
+        bodyPreview: cleanedBody.slice(0, 80),
+        keys: Object.keys(meta),
+      });
+
+      const cfg = await ctx.loadConfig();
+      const messageSid =
+        pickId(eventAny.id ?? meta.id) ||
+        pickId((eventAny as { message_id?: unknown }).message_id) ||
+        "";
+      const inboundMid =
+        pickId(eventAny.id ?? meta.id) ||
+        pickId((eventAny as { message_id?: unknown }).message_id) ||
+        pickId((eventAny as { mid?: unknown }).mid) ||
+        pickId((eventAny as { message?: unknown }).message);
+      const senderUid = pickNumberId(senderId);
+      if (
+        mode === "direct" &&
+        senderId &&
+        toIdRaw &&
+        senderId !== toIdRaw &&
+        senderId !== selfId &&
+        senderUid !== null &&
+        inboundMid
+      ) {
+        try {
+          const readResult = ctx.getReadOnlyClient()?.rosterManage?.readRosterMessage(senderUid, inboundMid);
+          await Promise.resolve(readResult);
+          logDebug("marked inbound direct message as read", {
+            senderUid,
+            mid: inboundMid,
+            senderId,
+            toId: toIdRaw,
+          });
+        } catch (err) {
+          logWarn("failed to mark inbound direct message as read", {
+            err,
+            senderUid,
+            mid: inboundMid ?? undefined,
+            senderId,
+            toId: toIdRaw,
+          });
+        }
+      }
+      let bodyToDispatch = cleanedBody;
+      if (mode === "group") {
+        bodyToDispatch = buildBodyWithPendingGroupContext(groupId, cleanedBody, isSlashCommand);
+      }
+      const dispatchTo = mode === "group" ? groupId : toIdRaw || account.username;
+      const sessionKey = mode === "group" ? `group:${groupId}` : targetId;
+      const outboundTarget: ClawchatMessageTarget =
+        mode === "group"
+          ? {
+              kind: "group",
+              id: groupId,
+            }
+          : {
+              kind: "user",
+              id: targetId,
+            };
+
+      const result = await ctx.dispatchReplyWithBufferedBlockDispatcher({
+        ctx: {
+          Body: bodyToDispatch,
+          BodyForCommands: cleanedBody,
+          CommandBody: cleanedBody,
+          CommandAuthorized: isSlashCommand,
+          From: senderId || targetId,
+          To: dispatchTo,
+          SessionKey: sessionKey,
+          AccountId: account.accountId,
+          MessageSid: messageSid || undefined,
+          Timestamp: Number.isFinite(timestampNum) ? timestampNum : Date.now(),
+          OriginatingChannel: CLAWCHAT_CHANNEL_ID as any,
+          OriginatingTo: mode === "group" ? groupId : targetId,
+          ChatType: mode,
+          Provider: CLAWCHAT_CHANNEL_ID,
+          Surface: CLAWCHAT_CHANNEL_ID,
+          SenderId: senderId || undefined,
+          SenderName: senderId || undefined,
+        },
+        cfg,
+        dispatcherOptions: {
+          deliver: async (payload: { text?: string; body?: string }) => {
+            const response = payload?.text ?? payload?.body ?? "";
+            if (!response.trim()) {
+              return;
+            }
+            await ctx.sendText(outboundTarget, response, account);
+          },
+          onError: (err: unknown, info: { kind: "tool" | "block" | "final" }) => {
+            logError(`reply dispatcher send failed (kind=${info.kind})`, err);
+          },
+          onSkip: (
+            payload: { text?: string; body?: string },
+            info: { kind: "tool" | "block" | "final"; reason: string },
+          ) => {
+            logDebug(
+              `reply dispatcher skipped payload (kind=${info.kind}, reason=${info.reason})`,
+              {
+                textPreview: (payload.text ?? payload.body ?? "").slice(0, 80),
+              },
+            );
+          },
+        },
+      });
+      logDebug("reply dispatcher result", result);
+    } catch (err) {
+      logError("failed to process inbound message", err);
+    }
+  }
+
+  return {
+    appendPendingGroupContext,
+    consumePendingGroupContext,
+    buildBodyWithPendingGroupContext,
+    handleRouterContext,
+    runRouterSignalInGroupQueue,
+    handleRouterRequest,
+    onInbound,
+  };
+}
