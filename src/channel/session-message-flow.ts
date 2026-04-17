@@ -31,6 +31,7 @@ import { pickId } from "../shared/utils.js";
 
 const GROUP_CONTEXT_MAX_MESSAGES = 30;
 const GROUP_CONTEXT_MAX_CHARS = 6_000;
+const CLAWCHAT_ROUTER_CHANNEL_ID = "clawchat-router";
 
 type PendingGroupContextEntry = {
   senderId: string;
@@ -53,11 +54,61 @@ type DispatcherOptions = {
   ) => void;
 };
 
+type ResolvedAgentRoute = {
+  agentId: string;
+  channel: string;
+  sessionKey: string;
+  mainSessionKey: string;
+  lastRoutePolicy: "main" | "session";
+  matchedBy:
+    | "binding.peer"
+    | "binding.peer.parent"
+    | "binding.peer.wildcard"
+    | "binding.guild+roles"
+    | "binding.guild"
+    | "binding.team"
+    | "binding.account"
+    | "binding.channel"
+    | "default";
+  accountId?: string;
+};
+
 type MessageFlowContext = {
   getSelfId: () => string;
   updateSelfIdFromClient: (reason: string) => void;
   getReadOnlyClient: () => { rosterManage?: { readRosterMessage: (rosterId: number, mid?: number | string) => unknown } } | null;
   loadConfig: () => Promise<OpenClawConfig>;
+  resolveAgentRoute: (params: {
+    cfg: OpenClawConfig;
+    channel: string;
+    accountId: string;
+    peer: { kind: "direct" | "group"; id: string };
+  }) => ResolvedAgentRoute;
+  resolveStorePath: (store: string | undefined, opts: { agentId: string }) => string;
+  readSessionUpdatedAt: (params: { storePath: string; sessionKey: string }) => number | undefined;
+  recordInboundSession: (params: {
+    storePath: string;
+    sessionKey: string;
+    ctx: Record<string, unknown>;
+    updateLastRoute?: {
+      sessionKey: string;
+      channel: string;
+      to: string;
+      accountId?: string;
+      threadId?: string;
+    };
+    onRecordError: (err: unknown) => void;
+  }) => Promise<void>;
+  resolveEnvelopeFormatOptions: (cfg: OpenClawConfig) => unknown;
+  formatAgentEnvelope: (params: {
+    channel: string;
+    from: string;
+    timestamp?: number;
+    previousTimestamp?: number;
+    envelope: unknown;
+    body: string;
+  }) => string;
+  finalizeInboundContext: (ctx: Record<string, unknown>) => Record<string, unknown>;
   dispatchReplyWithBufferedBlockDispatcher: (params: {
     ctx: Record<string, unknown>;
     cfg: OpenClawConfig;
@@ -127,6 +178,147 @@ function hasMentionHint(
 }
 
 export function createClawchatSessionMessageFlow(ctx: MessageFlowContext) {
+  async function recordAndDispatchInboundTurn(params: {
+    cfg: OpenClawConfig;
+    account: ResolvedClawchatAccount;
+    mode: "direct" | "group";
+    targetId: string;
+    senderId: string;
+    senderName?: string;
+    dispatchTo: string;
+    rawBody: string;
+    bodyForAgent: string;
+    commandBody: string;
+    commandAuthorized: boolean;
+    messageId?: string;
+    timestamp: number;
+    outboundTarget: ClawchatMessageTarget;
+  }): Promise<unknown> {
+    const route = ctx.resolveAgentRoute({
+      cfg: params.cfg,
+      channel: CLAWCHAT_CHANNEL_ID,
+      accountId: params.account.accountId,
+      peer: {
+        kind: params.mode === "group" ? "group" : "direct",
+        id: params.targetId,
+      },
+    });
+    const storePath = ctx.resolveStorePath(params.cfg.session?.store, {
+      agentId: route.agentId,
+    });
+    const previousTimestamp = ctx.readSessionUpdatedAt({
+      storePath,
+      sessionKey: route.sessionKey,
+    });
+    const envelopeOptions = ctx.resolveEnvelopeFormatOptions(params.cfg);
+    const conversationLabel =
+      params.mode === "direct"
+        ? params.senderName?.trim() || params.senderId || params.targetId
+        : params.targetId;
+    const envelopeBody = ctx.formatAgentEnvelope({
+      channel: "ClawChat",
+      from: conversationLabel,
+      body: params.rawBody,
+      timestamp: params.timestamp,
+      previousTimestamp,
+      envelope: envelopeOptions,
+    });
+    const finalizedCtx = ctx.finalizeInboundContext({
+      Body: envelopeBody,
+      BodyForAgent: params.bodyForAgent,
+      RawBody: params.rawBody,
+      CommandBody: params.commandBody,
+      CommandAuthorized: params.commandAuthorized,
+      From: params.senderId || params.targetId,
+      To: params.dispatchTo,
+      SessionKey: route.sessionKey,
+      AccountId: route.accountId ?? params.account.accountId,
+      ChatType: params.mode,
+      SenderId: params.senderId || undefined,
+      SenderName: params.senderName || params.senderId || undefined,
+      ConversationLabel: conversationLabel,
+      MessageSid: params.messageId || undefined,
+      MessageSidFull: params.messageId || undefined,
+      Timestamp: params.timestamp,
+      OriginatingChannel: CLAWCHAT_CHANNEL_ID,
+      OriginatingTo: params.targetId,
+      Provider: CLAWCHAT_CHANNEL_ID,
+      Surface: CLAWCHAT_CHANNEL_ID,
+    });
+    const persistedSessionKey =
+      typeof finalizedCtx.SessionKey === "string" && finalizedCtx.SessionKey.trim()
+        ? finalizedCtx.SessionKey.trim()
+        : route.sessionKey;
+    const updateLastRouteSessionKey =
+      route.lastRoutePolicy === "main" ? route.mainSessionKey : persistedSessionKey;
+
+    logDebug("inbound route/session resolved", {
+      mode: params.mode,
+      targetId: params.targetId,
+      routeAgentId: route.agentId,
+      routeSessionKey: persistedSessionKey,
+      routeMainSessionKey: route.mainSessionKey,
+      updateLastRouteSessionKey,
+      routeMatchedBy: route.matchedBy,
+      storePath,
+      conversationLabel,
+      messageId: params.messageId || undefined,
+    });
+
+    await ctx.recordInboundSession({
+      storePath,
+      sessionKey: persistedSessionKey,
+      ctx: finalizedCtx,
+      updateLastRoute: {
+        sessionKey: updateLastRouteSessionKey,
+        channel: CLAWCHAT_CHANNEL_ID,
+        to: params.targetId,
+        accountId: route.accountId ?? params.account.accountId,
+      },
+      onRecordError: (err: unknown) => {
+        logError("failed to record inbound session", {
+          err,
+          mode: params.mode,
+          targetId: params.targetId,
+          routeAgentId: route.agentId,
+          routeSessionKey: persistedSessionKey,
+          routeMainSessionKey: route.mainSessionKey,
+          updateLastRouteSessionKey,
+          storePath,
+          messageId: params.messageId || undefined,
+        });
+      },
+    });
+
+    return await ctx.dispatchReplyWithBufferedBlockDispatcher({
+      ctx: finalizedCtx,
+      cfg: params.cfg,
+      dispatcherOptions: {
+        deliver: async (payload: { text?: string; body?: string }) => {
+          const response = payload?.text ?? payload?.body ?? "";
+          if (!response.trim()) {
+            return;
+          }
+          await ctx.sendText(params.outboundTarget, response, params.account);
+        },
+        onError: (err: unknown, info: { kind: "tool" | "block" | "final" }) => {
+          logError(`reply dispatcher send failed (kind=${info.kind})`, err);
+        },
+        onSkip: (
+          payload: { text?: string; body?: string },
+          info: { kind: "tool" | "block" | "final"; reason: string },
+        ) => {
+          logDebug(
+            `reply dispatcher skipped payload (kind=${info.kind}, reason=${info.reason})`,
+            {
+              textPreview: (payload.text ?? payload.body ?? "").slice(0, 80),
+            },
+          );
+        },
+      },
+    });
+  }
+
   function appendPendingGroupContext(params: {
     groupId: string;
     senderId: string;
@@ -331,6 +523,34 @@ export function createClawchatSessionMessageFlow(ctx: MessageFlowContext) {
     const trimmedBody = cleanedBody.trim();
     const isSlashCommand = trimmedBody.startsWith("/");
     const replyTo = replyTargetSnapshot.replyId;
+    const routerGroupId = parseGroupId(
+      routerMeta,
+      routerMeta,
+      routerMessage as ClawchatInboundEvent,
+    );
+    const routerToType = String(
+      (routerMessage as { toType?: unknown }).toType ??
+        (routerMessage as { to_type?: unknown }).to_type ??
+        "",
+    )
+      .trim()
+      .toLowerCase();
+    const inboundMode =
+      (replyTargetSnapshot.replyKind === "group" || routerToType === "group" || Boolean(routerGroupId))
+        ? "group"
+        : "direct";
+    const inboundPeerId =
+      inboundMode === "group" ? routerGroupId || replyTo || toId || selfId : fromId || toId || selfId;
+    if (!inboundPeerId) {
+      logError("skip router_request: failed to resolve inbound peer id", {
+        requestSid: replyTargetSnapshot.requestSid,
+        fromId: fromId || undefined,
+        toId: toId || undefined,
+        routerGroupId: routerGroupId || undefined,
+        routerToType: routerToType || undefined,
+      });
+      return;
+    }
     const bodyToDispatch =
       replyTargetSnapshot.replyKind === "group"
         ? buildBodyWithPendingGroupContext(replyTo, cleanedBody, isSlashCommand)
@@ -350,10 +570,65 @@ export function createClawchatSessionMessageFlow(ctx: MessageFlowContext) {
     const replyFrom = selfId || toId || fromId;
     const replyToType = replyTargetSnapshot.replyKind === "group" ? "group" : "roster";
     const dispatchTo = replyTargetSnapshot.replyKind === "group" ? replyTo : toId || selfId;
-    const sessionKey =
-      replyTargetSnapshot.replyKind === "group"
-        ? `router:group:${replyTo}`
-        : `router:direct:${fromId || toId || selfId || CLAWCHAT_CHANNEL_ID}`;
+    const route = ctx.resolveAgentRoute({
+      cfg,
+      channel: CLAWCHAT_ROUTER_CHANNEL_ID,
+      accountId: account.accountId,
+      peer: {
+        kind: inboundMode === "group" ? "group" : "direct",
+        id: inboundPeerId,
+      },
+    });
+    const storePath = ctx.resolveStorePath(cfg.session?.store, {
+      agentId: route.agentId,
+    });
+    const previousTimestamp = ctx.readSessionUpdatedAt({
+      storePath,
+      sessionKey: route.sessionKey,
+    });
+    const envelopeOptions = ctx.resolveEnvelopeFormatOptions(cfg);
+    const conversationLabel =
+      inboundMode === "group"
+        ? routerGroupId || replyTo || toId || selfId
+        : fromId || inboundPeerId;
+    const envelopeBody = ctx.formatAgentEnvelope({
+      channel: "ClawChat",
+      from: conversationLabel,
+      body,
+      timestamp: Number.isFinite(timestampNum) ? timestampNum : Date.now(),
+      previousTimestamp,
+      envelope: envelopeOptions,
+    });
+    const finalizedCtx = ctx.finalizeInboundContext({
+      Body: envelopeBody,
+      BodyForAgent: bodyWithKnowledge,
+      RawBody: body,
+      CommandBody: cleanedBody,
+      BodyForCommands: cleanedBody,
+      CommandAuthorized: isSlashCommand,
+      From: fromId || toId || selfId,
+      To: dispatchTo,
+      SessionKey: route.sessionKey,
+      RouterRelay: routerRelayMark,
+      AccountId: route.accountId ?? account.accountId,
+      MessageSid: messageSid || undefined,
+      MessageSidFull: messageSid || undefined,
+      Timestamp: Number.isFinite(timestampNum) ? timestampNum : Date.now(),
+      OriginatingChannel: CLAWCHAT_CHANNEL_ID,
+      OriginatingTo: replyTo,
+      ChatType: inboundMode,
+      Provider: CLAWCHAT_CHANNEL_ID,
+      Surface: CLAWCHAT_CHANNEL_ID,
+      SenderId: fromId || undefined,
+      SenderName: resolveSenderNameFromConfig(routerMeta, routerMeta) || fromId || undefined,
+      ConversationLabel: conversationLabel,
+    });
+    const persistedSessionKey =
+      typeof finalizedCtx.SessionKey === "string" && finalizedCtx.SessionKey.trim()
+        ? finalizedCtx.SessionKey.trim()
+        : route.sessionKey;
+    const updateLastRouteSessionKey =
+      route.lastRoutePolicy === "main" ? route.mainSessionKey : persistedSessionKey;
     logDebug("router_request target resolved", {
       requestSid: replyTargetSnapshot.requestSid,
       replyKind: replyTargetSnapshot.replyKind,
@@ -362,29 +637,49 @@ export function createClawchatSessionMessageFlow(ctx: MessageFlowContext) {
       fromId: fromId || undefined,
       toId: toId || undefined,
     });
+    logDebug("router_request inbound route/session resolved", {
+      requestSid: replyTargetSnapshot.requestSid,
+      inboundMode,
+      inboundPeerId,
+      routeAgentId: route.agentId,
+      routeSessionKey: persistedSessionKey,
+      routeMainSessionKey: route.mainSessionKey,
+      updateLastRouteSessionKey,
+      routeMatchedBy: route.matchedBy,
+      storePath,
+      messageId: messageSid || undefined,
+    });
+
+    await ctx.recordInboundSession({
+      storePath,
+      sessionKey: persistedSessionKey,
+      ctx: finalizedCtx,
+      updateLastRoute: {
+        sessionKey: updateLastRouteSessionKey,
+        channel: CLAWCHAT_ROUTER_CHANNEL_ID,
+        to: replyTargetSnapshot.replyId,
+        accountId: route.accountId ?? account.accountId,
+      },
+      onRecordError: (err: unknown) => {
+        logError("router_request recordInboundSession failed", {
+          err,
+          requestSid: replyTargetSnapshot.requestSid,
+          routeAgentId: route.agentId,
+          routeSessionKey: persistedSessionKey,
+          storePath,
+          messageId: messageSid || undefined,
+        });
+      },
+    });
+    logDebug("router_request recordInboundSession success", {
+      requestSid: replyTargetSnapshot.requestSid,
+      routeSessionKey: persistedSessionKey,
+      updateLastRouteSessionKey,
+      messageId: messageSid || undefined,
+    });
 
     const result = await ctx.dispatchReplyWithBufferedBlockDispatcher({
-      ctx: {
-        Body: bodyWithKnowledge,
-        BodyForAgent: bodyWithKnowledge,
-        CommandBody: cleanedBody,
-        BodyForCommands: cleanedBody,
-        CommandAuthorized: isSlashCommand,
-        From: fromId || toId || selfId,
-        To: dispatchTo,
-        SessionKey: sessionKey,
-        RouterRelay: routerRelayMark,
-        AccountId: account.accountId,
-        MessageSid: messageSid || undefined,
-        Timestamp: Number.isFinite(timestampNum) ? timestampNum : Date.now(),
-        OriginatingChannel: CLAWCHAT_CHANNEL_ID as any,
-        OriginatingTo: replyTo,
-        ChatType: replyTargetSnapshot.replyKind === "group" ? "group" : "direct",
-        Provider: CLAWCHAT_CHANNEL_ID,
-        Surface: CLAWCHAT_CHANNEL_ID,
-        SenderId: fromId || undefined,
-        SenderName: fromId || undefined,
-      },
+      ctx: finalizedCtx,
       cfg,
       dispatcherOptions: {
         deliver: async (payload: { text?: string; body?: string }) => {
@@ -793,7 +1088,6 @@ export function createClawchatSessionMessageFlow(ctx: MessageFlowContext) {
         bodyToDispatch = buildBodyWithPendingGroupContext(groupId, cleanedBody, isSlashCommand);
       }
       const dispatchTo = mode === "group" ? groupId : toIdRaw || account.username;
-      const sessionKey = mode === "group" ? `group:${groupId}` : targetId;
       const outboundTarget: ClawchatMessageTarget =
         mode === "group"
           ? {
@@ -805,50 +1099,21 @@ export function createClawchatSessionMessageFlow(ctx: MessageFlowContext) {
               id: targetId,
             };
 
-      const result = await ctx.dispatchReplyWithBufferedBlockDispatcher({
-        ctx: {
-          Body: bodyToDispatch,
-          BodyForCommands: cleanedBody,
-          CommandBody: cleanedBody,
-          CommandAuthorized: isSlashCommand,
-          From: senderId || targetId,
-          To: dispatchTo,
-          SessionKey: sessionKey,
-          AccountId: account.accountId,
-          MessageSid: messageSid || undefined,
-          Timestamp: Number.isFinite(timestampNum) ? timestampNum : Date.now(),
-          OriginatingChannel: CLAWCHAT_CHANNEL_ID as any,
-          OriginatingTo: mode === "group" ? groupId : targetId,
-          ChatType: mode,
-          Provider: CLAWCHAT_CHANNEL_ID,
-          Surface: CLAWCHAT_CHANNEL_ID,
-          SenderId: senderId || undefined,
-          SenderName: senderId || undefined,
-        },
+      const result = await recordAndDispatchInboundTurn({
         cfg,
-        dispatcherOptions: {
-          deliver: async (payload: { text?: string; body?: string }) => {
-            const response = payload?.text ?? payload?.body ?? "";
-            if (!response.trim()) {
-              return;
-            }
-            await ctx.sendText(outboundTarget, response, account);
-          },
-          onError: (err: unknown, info: { kind: "tool" | "block" | "final" }) => {
-            logError(`reply dispatcher send failed (kind=${info.kind})`, err);
-          },
-          onSkip: (
-            payload: { text?: string; body?: string },
-            info: { kind: "tool" | "block" | "final"; reason: string },
-          ) => {
-            logDebug(
-              `reply dispatcher skipped payload (kind=${info.kind}, reason=${info.reason})`,
-              {
-                textPreview: (payload.text ?? payload.body ?? "").slice(0, 80),
-              },
-            );
-          },
-        },
+        account,
+        mode,
+        targetId,
+        senderId: senderId || targetId,
+        senderName: resolveSenderNameFromConfig(eventAny, meta) || undefined,
+        dispatchTo,
+        rawBody: body,
+        bodyForAgent: bodyToDispatch,
+        commandBody: cleanedBody,
+        commandAuthorized: isSlashCommand,
+        messageId: messageSid || undefined,
+        timestamp: Number.isFinite(timestampNum) ? timestampNum : Date.now(),
+        outboundTarget,
       });
       logDebug("reply dispatcher result", result);
     } catch (err) {

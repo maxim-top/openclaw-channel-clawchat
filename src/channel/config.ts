@@ -131,8 +131,7 @@ export function parseGroupId(
     pickId((eventAny as { conversation_id?: unknown }).conversation_id) ||
     pickId(meta.gid) ||
     pickId((meta as { group_id?: unknown }).group_id) ||
-    pickId((meta as { conversation_id?: unknown }).conversation_id) ||
-    groupIdByTo
+    pickId((meta as { conversation_id?: unknown }).conversation_id)
   );
 }
 

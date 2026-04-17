@@ -552,7 +552,7 @@ function shouldSkipWrappedTranscriptMessage(params: {
   messageId?: string;
 }): boolean {
   const sessionKey = pickId(params.sessionKey);
-  if (!sessionKey.startsWith("agent:main:router:")) {
+  if (!sessionKey.startsWith("agent:main:clawchat-router:")) {
     return false;
   }
   if (!pickId(params.messageId)) {

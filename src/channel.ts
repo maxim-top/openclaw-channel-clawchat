@@ -349,6 +349,13 @@ class ClawchatSession {
     updateSelfIdFromClient: (reason) => this.updateSelfIdFromClient(reason),
     getReadOnlyClient: () => this.client,
     loadConfig: async () => (await getClawchatRuntime().config.loadConfig()) as OpenClawConfig,
+    resolveAgentRoute: (params) => getClawchatRuntime().channel.routing.resolveAgentRoute(params),
+    resolveStorePath: (store, opts) => getClawchatRuntime().channel.session.resolveStorePath(store, opts),
+    readSessionUpdatedAt: (params) => getClawchatRuntime().channel.session.readSessionUpdatedAt(params),
+    recordInboundSession: (params) => getClawchatRuntime().channel.session.recordInboundSession(params),
+    resolveEnvelopeFormatOptions: (cfg) => getClawchatRuntime().channel.reply.resolveEnvelopeFormatOptions(cfg),
+    formatAgentEnvelope: (params) => getClawchatRuntime().channel.reply.formatAgentEnvelope(params),
+    finalizeInboundContext: (ctx) => getClawchatRuntime().channel.reply.finalizeInboundContext(ctx),
     dispatchReplyWithBufferedBlockDispatcher: (params) =>
       getClawchatRuntime().channel.reply.dispatchReplyWithBufferedBlockDispatcher(params),
     sendRouterReplyToSelf: (message) => this.sendRouterReplyToSelf(message),
