@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
-import { getClawchatRuntime } from "./runtime.js";
-import { logDebug, logWarn } from "./logging.js";
-import { asPlainObject, maybeParseJson, stripAnsi } from "./utils.js";
+import { getClawchatRuntime } from "../runtime.js";
+import { logDebug, logWarn } from "../shared/logging.js";
+import { asPlainObject, maybeParseJson, stripAnsi } from "../shared/utils.js";
 
 export function isConfigChangedSinceLastLoadError(err: unknown): boolean {
   const text =

@@ -1,4 +1,4 @@
-import { logDebug, logError, logWarn } from "./logging.js";
+import { logDebug, logError, logWarn } from "../shared/logging.js";
 import {
   extractConfigPatchRaw,
   extractPresetPromptSync,
@@ -10,7 +10,7 @@ import {
   resolveRouterReplyTargetSnapshot,
   type PresetPromptSyncPayload,
   type RouterReplyTargetSnapshot,
-} from "./channel-message.js";
+} from "./message.js";
 import {
   hasSelfMentionInConfig,
   isGroupAllowedByPolicy,
@@ -19,15 +19,15 @@ import {
   resolveGroupRequireMention,
   resolveSenderNameFromConfig,
   resolveToUserNicknameFromConfig,
-} from "./channel-config.js";
+} from "./config.js";
 import {
   CLAWCHAT_CHANNEL_ID,
   type ClawchatInboundEvent,
   type ClawchatMessageTarget,
   type OpenClawConfig,
   type ResolvedClawchatAccount,
-} from "./types.js";
-import { pickId } from "./utils.js";
+} from "../types.js";
+import { pickId } from "../shared/utils.js";
 
 const GROUP_CONTEXT_MAX_MESSAGES = 30;
 const GROUP_CONTEXT_MAX_CHARS = 6_000;

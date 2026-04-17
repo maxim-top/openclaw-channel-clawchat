@@ -1,5 +1,5 @@
-import { logDebug, logWarn, redactString } from "./logging.js";
-import { asPlainObject, pickId } from "./utils.js";
+import { logDebug, logWarn, redactString } from "../shared/logging.js";
+import { asPlainObject, pickId } from "../shared/utils.js";
 
 const SESSION_LOG_BODY_PREVIEW_MAX = 280;
 const SESSION_LOG_RAW_SNIPPET_KEYS_MAX = 12;

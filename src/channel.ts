@@ -1,30 +1,31 @@
+import { createHash } from "node:crypto";
 import * as fs from "node:fs";
+import { createRequire } from "node:module";
 import os from "node:os";
 import path from "node:path";
-import { createRequire } from "node:module";
 import { fileURLToPath } from "node:url";
-import { createHash } from "node:crypto";
-import { getClawchatRuntime } from "./runtime.js";
-import { logDebug, logError, logWarn } from "./logging.js";
-import { createClawchatSessionMessageFlow } from "./channel-session-message-flow.js";
-import {
-  collectHashCandidates,
-  isHistoryEvent,
-  type RouterReplyTargetSnapshot,
-} from "./channel-message.js";
+
 import {
   normalizeAllowEntry,
   normalizeTarget,
   resolveClawchatAccount,
   sanitizeAccountForLog,
-} from "./channel-config.js";
+} from "./channel/config.js";
+import {
+  collectHashCandidates,
+  isHistoryEvent,
+  type RouterReplyTargetSnapshot,
+} from "./channel/message.js";
+import { createClawchatSessionMessageFlow } from "./channel/session-message-flow.js";
 import {
   findBaseHash,
   isConfigChangedSinceLastLoadError,
   parseJsonFromMixedText,
   runGatewayCall,
-} from "./openclaw-gateway.js";
-import { asPlainObject, pickId, stripAnsi } from "./utils.js";
+} from "./openclaw/gateway.js";
+import { getClawchatRuntime } from "./runtime.js";
+import { asPlainObject, pickId, stripAnsi } from "./shared/utils.js";
+import { logDebug, logError, logWarn } from "./shared/logging.js";
 import {
   CLAWCHAT_CHANNEL_ID,
   CLAWCHAT_DEFAULT_ACCOUNT_ID,
@@ -34,6 +35,8 @@ import {
   type ResolvedClawchatAccount,
 } from "./types.js";
 
+// SDK-facing local types stay here because they are only used by the
+// main channel entry and session orchestration layer.
 type FlooFactory = (options: Record<string, unknown>) => ClawchatImClient;
 
 type ClawchatImClient = {
@@ -82,6 +85,7 @@ type ClawchatImClient = {
   };
 };
 
+// Plugin surface metadata and runtime constants.
 const meta = {
   id: CLAWCHAT_CHANNEL_ID,
   label: "ClawChat",
@@ -113,6 +117,7 @@ const CLAWCHAT_MANAGED_DIR = "clawchat";
 const CLAWCHAT_MANAGED_AGENTS_PATH = `${CLAWCHAT_MANAGED_DIR}/AGENTS.md`;
 const DEFAULT_AGENT_ID = "main";
 
+// Node/browser bridge helpers for the bundled IM SDK.
 class NodeXmlHttpRequest {
   readyState = 0;
   status = 0;
@@ -309,6 +314,7 @@ function pickNumberId(value: unknown): number | null {
   return null;
 }
 
+// Main plugin session orchestrator.
 class ClawchatSession {
   private client: ClawchatImClient | null = null;
   private accountKey: string | null = null;
@@ -1403,6 +1409,7 @@ class ClawchatSession {
 
 const session = new ClawchatSession();
 
+// OpenClaw channel plugin export.
 export const clawchatPlugin: any = {
   id: CLAWCHAT_CHANNEL_ID,
   meta,

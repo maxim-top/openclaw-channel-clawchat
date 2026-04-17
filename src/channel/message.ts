@@ -1,6 +1,6 @@
-import { logWarn } from "./logging.js";
-import { maybeParseJson, pickId } from "./utils.js";
-import { type ClawchatInboundEvent } from "./types.js";
+import { logWarn } from "../shared/logging.js";
+import { maybeParseJson, pickId } from "../shared/utils.js";
+import { type ClawchatInboundEvent } from "../types.js";
 
 export type PresetPromptSyncPayload = {
   chatbotId: string;

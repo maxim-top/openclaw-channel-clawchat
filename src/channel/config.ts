@@ -1,4 +1,4 @@
-import { maybeParseJson, pickId } from "./utils.js";
+import { maybeParseJson, pickId } from "../shared/utils.js";
 import {
   CLAWCHAT_CHANNEL_ID,
   CLAWCHAT_DEFAULT_ACCOUNT_ID,
@@ -8,7 +8,7 @@ import {
   type ClawchatMessageTarget,
   type OpenClawConfig,
   type ResolvedClawchatAccount,
-} from "./types.js";
+} from "../types.js";
 
 export function parseConfigValue(value: unknown): Record<string, unknown> | null {
   if (!value) {

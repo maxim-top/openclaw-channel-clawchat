@@ -3,7 +3,7 @@ import {
   formatGlobalOpenClawSessionLoggerStatus,
   installGlobalOpenClawSessionLogger,
   resetGlobalOpenClawSessionLoggerStatus,
-} from "./src/session-logger.js";
+} from "./src/openclaw/session-logger.js";
 import { setClawchatRuntime } from "./src/runtime.js";
 
 type OpenClawPluginApi = {
