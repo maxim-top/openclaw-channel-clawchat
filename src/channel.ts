@@ -14,6 +14,7 @@ import {
 import {
   collectHashCandidates,
   type RouterReplyTargetSnapshot,
+  type SessionMappingSignal,
 } from "./channel/message.js";
 import { createClawchatSessionMessageFlow } from "./channel/session-message-flow.js";
 import {
@@ -343,6 +344,8 @@ class ClawchatSession {
     Array<{ senderId: string; senderName?: string; body: string; timestamp: number }>
   >();
   private routerGroupQueueByGroupId = new Map<string, { tail: Promise<void>; pending: number }>();
+  private sessionMappingByGroupKey = new Map<string, { sessionKey: string; updatedAt: number }>();
+  private sessionMappingBySessionKey = new Map<string, { groupKey: string; updatedAt: number }>();
   private readonly messageFlow = createClawchatSessionMessageFlow({
     getSelfId: () => this.selfId,
     updateSelfIdFromClient: (reason) => this.updateSelfIdFromClient(reason),
@@ -363,9 +366,60 @@ class ClawchatSession {
     applyOpenClawConfigPatch: (rawPatch) => this.applyOpenClawConfigPatch(rawPatch),
     handlePresetPromptSync: (params) => this.handlePresetPromptSync(params),
     sendText: (target, text, account) => this.sendText(target, text, account),
+    resolveSessionMapping: (params) => this.resolveSessionMapping(params),
+    applySessionMappingSignal: (signal) => this.applySessionMappingSignal(signal),
     pendingGroupContext: this.pendingGroupContext,
     routerGroupQueueByGroupId: this.routerGroupQueueByGroupId,
   });
+
+  private buildSessionMappingGroupKey(params: {
+    openclawUserId: string;
+    groupId: string;
+  }): string {
+    return [params.openclawUserId.trim(), params.groupId.trim()].join("|");
+  }
+
+  private normalizeSessionMappingSessionKey(sessionKey: string): string {
+    return sessionKey.trim().toLowerCase();
+  }
+
+  private resolveSessionMapping(params: {
+    appId: string;
+    openclawUserId: string;
+    groupId: string;
+  }): { sessionKey: string } | null {
+    const key = this.buildSessionMappingGroupKey(params);
+    const mapping = this.sessionMappingByGroupKey.get(key);
+    if (!mapping?.sessionKey) {
+      return null;
+    }
+    return { sessionKey: mapping.sessionKey };
+  }
+
+  private applySessionMappingSignal(signal: SessionMappingSignal): void {
+    const now = Date.now();
+    const scopedOpenclawUserId = signal.openclawUserId?.trim() || this.selfId.trim();
+    for (const mapping of signal.mappings) {
+      const openclawUserId = mapping.openclawUserId?.trim() || scopedOpenclawUserId;
+      const groupId = mapping.groupId.trim();
+      const sessionKey = mapping.session.trim();
+      if (!openclawUserId || !groupId || !sessionKey) {
+        continue;
+      }
+      const updatedAt = mapping.updatedAt ?? now;
+      const groupKey = this.buildSessionMappingGroupKey({
+        openclawUserId,
+        groupId,
+      });
+      const normalizedSessionKey = this.normalizeSessionMappingSessionKey(sessionKey);
+      const previousBySession = this.sessionMappingBySessionKey.get(normalizedSessionKey);
+      if (previousBySession && previousBySession.groupKey !== groupKey) {
+        this.sessionMappingByGroupKey.delete(previousBySession.groupKey);
+      }
+      this.sessionMappingByGroupKey.set(groupKey, { sessionKey, updatedAt });
+      this.sessionMappingBySessionKey.set(normalizedSessionKey, { groupKey, updatedAt });
+    }
+  }
 
   private appendPendingGroupContext(params: {
     groupId: string;
@@ -992,6 +1046,11 @@ class ClawchatSession {
     source?: string;
   }): Promise<void> {
     if (!this.client || !this.selfId || !this.client.isLogin?.()) {
+      return;
+    }
+    const cfg = await getClawchatRuntime().config.loadConfig();
+    const account = resolveClawchatAccount(cfg);
+    if (!account.allowManage) {
       return;
     }
     const message = asPlainObject(update.message);

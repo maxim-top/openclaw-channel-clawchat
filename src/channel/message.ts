@@ -29,6 +29,19 @@ export type RouterReplyTargetSnapshot = {
   replyId: string;
 };
 
+export type SessionMappingPayload = {
+  session: string;
+  groupId: string;
+  openclawUserId?: string;
+  updatedAt?: number;
+};
+
+export type SessionMappingSignal = {
+  type: "session_mapping_sync" | "session_mapping_snapshot";
+  mappings: SessionMappingPayload[];
+  openclawUserId?: string;
+};
+
 export function parseExtValue(value: unknown): Record<string, unknown> | null {
   if (!value) {
     return null;
@@ -171,6 +184,71 @@ export function extractRouterSignal(
       signalType,
       messageType: typeof openclawObj.message,
     });
+  }
+  return null;
+}
+
+function normalizeSessionMappingPayload(value: unknown): SessionMappingPayload | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return null;
+  }
+  const obj = value as Record<string, unknown>;
+  const session = String(obj.session ?? obj.sessionKey ?? obj.session_key ?? "").trim();
+  const groupId = String(obj.group_id ?? obj.groupId ?? "").trim();
+  if (!session || !groupId) {
+    return null;
+  }
+  const updatedAtRaw = Number(obj.updated_at ?? obj.updatedAt ?? 0);
+  return {
+    session,
+    groupId,
+    openclawUserId: String(obj.openclaw_user_id ?? obj.openclawUserId ?? "").trim() || undefined,
+    updatedAt: Number.isFinite(updatedAtRaw) && updatedAtRaw > 0 ? updatedAtRaw : undefined,
+  };
+}
+
+export function extractSessionMappingSignal(
+  eventAny: Record<string, unknown>,
+  meta: Record<string, unknown>,
+): SessionMappingSignal | null {
+  const payload = (eventAny.payload ?? meta.payload) as Record<string, unknown> | undefined;
+  const extObjCandidates = [
+    parseExtValue(eventAny.ext),
+    parseExtValue(meta.ext),
+    parseExtValue(payload?.ext),
+  ].filter(Boolean) as Record<string, unknown>[];
+
+  for (const extObj of extObjCandidates) {
+    const openclaw = extObj.openclaw;
+    if (!openclaw || typeof openclaw !== "object" || Array.isArray(openclaw)) {
+      continue;
+    }
+    const openclawObj = openclaw as Record<string, unknown>;
+    const signalType = String(openclawObj.type ?? "").trim();
+    if (signalType !== "session_mapping_sync" && signalType !== "session_mapping_snapshot") {
+      continue;
+    }
+    const mappingsRaw = Array.isArray(openclawObj.mappings)
+      ? openclawObj.mappings
+      : openclawObj.mapping
+        ? [openclawObj.mapping]
+        : [openclawObj];
+    const mappings = mappingsRaw
+      .map((item) => normalizeSessionMappingPayload(item))
+      .filter(Boolean) as SessionMappingPayload[];
+    if (mappings.length === 0 && signalType !== "session_mapping_snapshot") {
+      logWarn("skip session mapping signal: no valid mappings", {
+        signalType,
+      });
+      return null;
+    }
+    return {
+      type: signalType,
+      mappings,
+      openclawUserId:
+        String(openclawObj.openclaw_user_id ?? openclawObj.openclawUserId ?? "").trim() ||
+        undefined,
+    };
   }
   return null;
 }
