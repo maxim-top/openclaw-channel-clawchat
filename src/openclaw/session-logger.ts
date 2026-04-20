@@ -2,20 +2,42 @@ import { asPlainObject, pickId } from "../shared/utils.js";
 
 const GLOBAL_SESSION_LOGGER_INSTALLED = "__clawchatSessionLoggerInstalled";
 const SESSION_SYNC_DEDUPE_TTL_MS = 30_000;
+const SESSION_SOURCE_TTL_MS = 30 * 60_000;
+const FORWARDED_USER_TURN_TTL_MS = 60_000;
 const RECENT_UPDATES_LIMIT = 20;
 const BODY_PREVIEW_MAX = 200;
+const CLAWCHAT_CHANNEL_IDS = new Set(["clawchat", "clawchat-router", "lanying"]);
+const LEADING_TIMESTAMP_PREFIX_RE = /^\[[A-Za-z]{3} \d{4}-\d{2}-\d{2} \d{2}:\d{2}[^\]]*\] */;
+const INBOUND_META_SENTINELS = [
+  "Conversation info (untrusted metadata):",
+  "Sender (untrusted metadata):",
+  "Thread starter (untrusted, for context):",
+  "Replied message (untrusted, for context):",
+  "Forwarded message context (untrusted metadata):",
+  "Chat history since last reply (untrusted, for context):",
+] as const;
+
+export type SessionMessageSyncSource =
+  | "control_ui_user"
+  | "control_ui_reply"
+  | "im_inbound_user"
+  | "im_inbound_reply";
+
+type RememberedSessionSource = "control_ui" | "im_inbound";
 
 type SessionTranscriptUpdate = {
   sessionFile: string;
   sessionKey?: string;
   message?: unknown;
   messageId?: string;
+  source?: SessionMessageSyncSource;
 };
 
 type SessionLoggerSnapshot = {
   at: number;
   sessionKey: string;
   messageId?: string;
+  source?: SessionMessageSyncSource;
   role?: string;
   bodyPreview?: string;
 };
@@ -25,32 +47,344 @@ type SessionLoggerInstallOptions = {
 };
 
 const recentUpdateKeys = new Map<string, number>();
+const recentSessionSources = new Map<string, { source: RememberedSessionSource; seenAt: number }>();
+const recentForwardedControlUiUsers = new Map<
+  string,
+  { normalizedText: string; seenAt: number; messageId?: string }
+>();
 const recentSnapshots: SessionLoggerSnapshot[] = [];
 
-function cleanupRecentUpdateKeys(now = Date.now()): void {
+function cleanupRecentState(now = Date.now()): void {
   for (const [key, seenAt] of recentUpdateKeys.entries()) {
     if (now - seenAt > SESSION_SYNC_DEDUPE_TTL_MS) {
       recentUpdateKeys.delete(key);
     }
   }
+  for (const [key, entry] of recentSessionSources.entries()) {
+    if (now - entry.seenAt > SESSION_SOURCE_TTL_MS) {
+      recentSessionSources.delete(key);
+    }
+  }
+  for (const [key, entry] of recentForwardedControlUiUsers.entries()) {
+    if (now - entry.seenAt > FORWARDED_USER_TURN_TTL_MS) {
+      recentForwardedControlUiUsers.delete(key);
+    }
+  }
+}
+
+function normalizeHint(value: unknown): string {
+  return typeof value === "string" ? value.trim().toLowerCase() : "";
+}
+
+function isSupportedSyncSource(value: unknown): value is SessionMessageSyncSource {
+  return (
+    value === "control_ui_user" ||
+    value === "control_ui_reply" ||
+    value === "im_inbound_user" ||
+    value === "im_inbound_reply"
+  );
+}
+
+function resolveSessionIdentity(update: SessionTranscriptUpdate): string {
+  return (pickId(update.sessionKey) || update.sessionFile || "").trim().toLowerCase();
+}
+
+function hasClawchatChannelHint(value: unknown): boolean {
+  return CLAWCHAT_CHANNEL_IDS.has(normalizeHint(value));
+}
+
+function isOpenClawGeneratedMirror(message: Record<string, unknown> | null): boolean {
+  if (!message || normalizeHint(message.provider) !== "openclaw") {
+    return false;
+  }
+  const model = normalizeHint(message.model);
+  return model === "delivery-mirror" || model === "gateway-injected";
+}
+
+function extractSyncSource(value: unknown): SessionMessageSyncSource | null {
+  return isSupportedSyncSource(value) ? value : null;
+}
+
+function extractMessageSyncSource(message: Record<string, unknown> | null): SessionMessageSyncSource | null {
+  if (!message) {
+    return null;
+  }
+  const openclawMeta = asPlainObject(message.__openclaw);
+  return (
+    extractSyncSource(message.syncSource) ||
+    extractSyncSource(message.source) ||
+    extractSyncSource(openclawMeta?.syncSource) ||
+    extractSyncSource(openclawMeta?.source)
+  );
+}
+
+function rememberSessionSource(
+  sessionIdentity: string,
+  source: RememberedSessionSource | null,
+  now = Date.now(),
+): void {
+  if (!sessionIdentity || !source) {
+    return;
+  }
+  recentSessionSources.set(sessionIdentity, { source, seenAt: now });
+}
+
+function resolveRememberedSessionSource(
+  sessionIdentity: string,
+  now = Date.now(),
+): RememberedSessionSource | null {
+  if (!sessionIdentity) {
+    return null;
+  }
+  cleanupRecentState(now);
+  const remembered = recentSessionSources.get(sessionIdentity);
+  if (!remembered) {
+    return null;
+  }
+  remembered.seenAt = now;
+  recentSessionSources.set(sessionIdentity, remembered);
+  return remembered.source;
+}
+
+function messageLooksLikeClawchatInbound(message: Record<string, unknown> | null): boolean {
+  if (!message) {
+    return false;
+  }
+  if (
+    hasClawchatChannelHint(message.OriginatingChannel) ||
+    hasClawchatChannelHint(message.Provider) ||
+    hasClawchatChannelHint(message.Surface)
+  ) {
+    return true;
+  }
+  const provenance = asPlainObject(message.provenance);
+  if (hasClawchatChannelHint(provenance?.sourceChannel)) {
+    return true;
+  }
+  const sourceTool = normalizeHint(provenance?.sourceTool);
+  return sourceTool.includes("clawchat") || sourceTool.includes("lanying");
+}
+
+function resolveUserMessageSyncSource(
+  message: Record<string, unknown> | null,
+): SessionMessageSyncSource | null {
+  if (!message || isOpenClawGeneratedMirror(message)) {
+    return null;
+  }
+  if (messageLooksLikeClawchatInbound(message)) {
+    return "im_inbound_user";
+  }
+  const provenance = asPlainObject(message.provenance);
+  const sourceChannel = normalizeHint(provenance?.sourceChannel);
+  const sourceTool = normalizeHint(provenance?.sourceTool);
+  if (sourceChannel || sourceTool) {
+    return sourceChannel === "webchat" ? "control_ui_user" : null;
+  }
+  return "control_ui_user";
+}
+
+function resolveReplySyncSource(
+  sessionIdentity: string,
+  message: Record<string, unknown> | null,
+): SessionMessageSyncSource | null {
+  if (!message || isOpenClawGeneratedMirror(message)) {
+    return null;
+  }
+  const remembered = resolveRememberedSessionSource(sessionIdentity);
+  if (remembered === "control_ui") {
+    return "control_ui_reply";
+  }
+  if (remembered === "im_inbound") {
+    return "im_inbound_reply";
+  }
+  return null;
+}
+
+function isInboundMetaSentinelLine(line: string): boolean {
+  const trimmed = line.trim();
+  return INBOUND_META_SENTINELS.some((sentinel) => sentinel === trimmed);
+}
+
+function stripInboundMetadata(text: string): string {
+  if (!text) {
+    return text;
+  }
+  const withoutTimestamp = text.replace(LEADING_TIMESTAMP_PREFIX_RE, "");
+  const lines = withoutTimestamp.split("\n");
+  const result: string[] = [];
+  let inMetaBlock = false;
+  let inFencedJson = false;
+
+  for (let i = 0; i < lines.length; i += 1) {
+    const line = lines[i] ?? "";
+    if (!inMetaBlock && isInboundMetaSentinelLine(line)) {
+      const next = lines[i + 1] ?? "";
+      if (next.trim() !== "```json") {
+        result.push(line);
+        continue;
+      }
+      inMetaBlock = true;
+      inFencedJson = false;
+      continue;
+    }
+    if (inMetaBlock) {
+      if (!inFencedJson && line.trim() === "```json") {
+        inFencedJson = true;
+        continue;
+      }
+      if (inFencedJson && line.trim() === "```") {
+        inMetaBlock = false;
+        inFencedJson = false;
+        while (i + 1 < lines.length && (lines[i + 1] ?? "").trim() === "") {
+          i += 1;
+        }
+        continue;
+      }
+      continue;
+    }
+    result.push(line);
+  }
+
+  return result.join("\n").trim().replace(LEADING_TIMESTAMP_PREFIX_RE, "").trim();
+}
+
+function normalizeVisibleUserText(text: string): string {
+  return stripInboundMetadata(text).replace(/\s+/g, " ").trim();
+}
+
+function hasInjectedMetadataEnvelope(text: string): boolean {
+  if (!text) {
+    return false;
+  }
+  if (LEADING_TIMESTAMP_PREFIX_RE.test(text)) {
+    return true;
+  }
+  const normalized = text.trim();
+  return INBOUND_META_SENTINELS.some((sentinel) => normalized.includes(sentinel));
+}
+
+function extractMessageVisibleText(value: unknown): string {
+  if (typeof value === "string") {
+    return value;
+  }
+  if (Array.isArray(value)) {
+    return value
+      .map((item) => {
+        if (typeof item === "string") {
+          return item;
+        }
+        const obj = asPlainObject(item);
+        if (!obj) {
+          return "";
+        }
+        if (typeof obj.text === "string") {
+          return obj.text;
+        }
+        return extractMessageVisibleText(obj.content);
+      })
+      .filter(Boolean)
+      .join("\n\n");
+  }
+  const obj = asPlainObject(value);
+  if (!obj) {
+    return "";
+  }
+  if (typeof obj.text === "string") {
+    return obj.text;
+  }
+  if (Object.prototype.hasOwnProperty.call(obj, "content")) {
+    return extractMessageVisibleText(obj.content);
+  }
+  return "";
+}
+
+function shouldSuppressDuplicatedControlUiUser(update: SessionTranscriptUpdate): boolean {
+  const sessionIdentity = resolveSessionIdentity(update);
+  if (!sessionIdentity) {
+    return false;
+  }
+  const message = asPlainObject(update.message);
+  const rawVisibleText = extractMessageVisibleText(message?.content);
+  const strippedVisibleText = normalizeVisibleUserText(rawVisibleText);
+  if (!strippedVisibleText) {
+    return false;
+  }
+  const injectedEnvelope = hasInjectedMetadataEnvelope(rawVisibleText);
+  const now = Date.now();
+  cleanupRecentState(now);
+  const previous = recentForwardedControlUiUsers.get(sessionIdentity);
+
+  if (!injectedEnvelope) {
+    recentForwardedControlUiUsers.set(sessionIdentity, {
+      normalizedText: strippedVisibleText,
+      seenAt: now,
+      messageId: update.messageId,
+    });
+    return false;
+  }
+
+  if (!previous?.normalizedText) {
+    return true;
+  }
+
+  const previousText = previous.normalizedText;
+  return (
+    strippedVisibleText === previousText ||
+    strippedVisibleText.includes(previousText) ||
+    previousText.includes(strippedVisibleText)
+  );
+}
+
+function resolveUpdateSyncSource(update: SessionTranscriptUpdate): SessionMessageSyncSource | null {
+  const sessionIdentity = resolveSessionIdentity(update);
+  const message = asPlainObject(update.message);
+  const explicitSource = extractSyncSource(update.source) || extractMessageSyncSource(message);
+  if (explicitSource) {
+    rememberSessionSource(
+      sessionIdentity,
+      explicitSource.startsWith("control_ui") ? "control_ui" : "im_inbound",
+    );
+    return explicitSource;
+  }
+  const role = normalizeHint(message?.role ?? message?.authorRole);
+  if (role === "user") {
+    const source = resolveUserMessageSyncSource(message);
+    rememberSessionSource(
+      sessionIdentity,
+      source === "control_ui_user" ? "control_ui" : source === "im_inbound_user" ? "im_inbound" : null,
+    );
+    return source;
+  }
+  if (role === "assistant") {
+    return resolveReplySyncSource(sessionIdentity, message);
+  }
+  return null;
 }
 
 function shouldProcessUpdate(update: SessionTranscriptUpdate): boolean {
-  const sessionKey = pickId(update.sessionKey) || update.sessionFile || "";
+  const syncSource = resolveUpdateSyncSource(update);
+  if (syncSource !== "control_ui_user" && syncSource !== "control_ui_reply") {
+    return false;
+  }
+  if (syncSource === "control_ui_user" && shouldSuppressDuplicatedControlUiUser(update)) {
+    return false;
+  }
+  const sessionKey = resolveSessionIdentity(update);
   const message = asPlainObject(update.message);
   const timestamp = Number(message?.timestamp ?? message?.createdAt ?? 0) || 0;
-  const role = String(message?.role ?? message?.authorRole ?? "").trim().toLowerCase();
+  const role = normalizeHint(message?.role ?? message?.authorRole);
   const bodyPreview = extractBodyPreview(update.message);
   const dedupeKey = [
     "transcript",
     sessionKey,
     update.messageId ?? "",
+    syncSource,
     role,
     String(timestamp),
     bodyPreview,
   ].join("|");
   const now = Date.now();
-  cleanupRecentUpdateKeys(now);
+  cleanupRecentState(now);
   if (recentUpdateKeys.has(dedupeKey)) {
     return false;
   }
@@ -99,9 +433,10 @@ function rememberSnapshot(update: SessionTranscriptUpdate): void {
   const message = asPlainObject(update.message);
   recentSnapshots.push({
     at: Date.now(),
-    sessionKey: pickId(update.sessionKey) || update.sessionFile || "",
+    sessionKey: resolveSessionIdentity(update),
     messageId: update.messageId,
-    role: String(message?.role ?? message?.authorRole ?? "").trim().toLowerCase() || undefined,
+    source: resolveUpdateSyncSource(update) ?? undefined,
+    role: normalizeHint(message?.role ?? message?.authorRole) || undefined,
     bodyPreview: extractBodyPreview(update.message) || undefined,
   });
   if (recentSnapshots.length > RECENT_UPDATES_LIMIT) {
@@ -120,6 +455,7 @@ export function formatGlobalOpenClawSessionLoggerStatus(): string {
         new Date(snapshot.at).toISOString(),
         `session=${snapshot.sessionKey}`,
         snapshot.messageId ? `messageId=${snapshot.messageId}` : "",
+        snapshot.source ? `source=${snapshot.source}` : "",
         snapshot.role ? `role=${snapshot.role}` : "",
         snapshot.bodyPreview ? `body="${snapshot.bodyPreview}"` : "",
       ]
@@ -132,6 +468,8 @@ export function formatGlobalOpenClawSessionLoggerStatus(): string {
 
 export function resetGlobalOpenClawSessionLoggerStatus(): string {
   recentUpdateKeys.clear();
+  recentSessionSources.clear();
+  recentForwardedControlUiUsers.clear();
   recentSnapshots.length = 0;
   return "ClawChat session sync status reset.";
 }
@@ -162,11 +500,13 @@ export function installGlobalOpenClawSessionLogger(
       listener: (update: SessionTranscriptUpdate) => void,
     ) => () => void
   )((update) => {
+    const source = resolveUpdateSyncSource(update);
     if (!shouldProcessUpdate(update)) {
       return;
     }
-    rememberSnapshot(update);
-    void options.onSessionTranscriptUpdate?.(update);
+    const nextUpdate = source ? { ...update, source } : update;
+    rememberSnapshot(nextUpdate);
+    void options.onSessionTranscriptUpdate?.(nextUpdate);
   });
 
   const dispose = () => {

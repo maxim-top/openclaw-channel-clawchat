@@ -989,6 +989,7 @@ class ClawchatSession {
     sessionKey?: string;
     message?: unknown;
     messageId?: string;
+    source?: string;
   }): Promise<void> {
     if (!this.client || !this.selfId || !this.client.isLogin?.()) {
       return;
@@ -1004,6 +1005,9 @@ class ClawchatSession {
       session:
         (typeof update.sessionKey === "string" && update.sessionKey.trim()) ||
         String(update.sessionFile ?? ""),
+      ...(typeof update.source === "string" && update.source.trim()
+        ? { source: update.source.trim() }
+        : {}),
       message: message
         ? {
             role,
@@ -1464,6 +1468,7 @@ export async function emitSessionMessageSyncToSelf(update: {
   sessionKey?: string;
   message?: unknown;
   messageId?: string;
+  source?: string;
 }): Promise<void> {
   await session.sendSessionMessageSyncToSelf(update);
 }

@@ -244,6 +244,11 @@ export function createClawchatSessionMessageFlow(ctx: MessageFlowContext) {
       OriginatingTo: params.targetId,
       Provider: CLAWCHAT_CHANNEL_ID,
       Surface: CLAWCHAT_CHANNEL_ID,
+      InputProvenance: {
+        kind: "external_user",
+        sourceChannel: CLAWCHAT_CHANNEL_ID,
+        sourceTool: "clawchat_im",
+      },
     });
     const persistedSessionKey =
       typeof finalizedCtx.SessionKey === "string" && finalizedCtx.SessionKey.trim()
@@ -619,6 +624,11 @@ export function createClawchatSessionMessageFlow(ctx: MessageFlowContext) {
       ChatType: inboundMode,
       Provider: CLAWCHAT_CHANNEL_ID,
       Surface: CLAWCHAT_CHANNEL_ID,
+      InputProvenance: {
+        kind: "external_user",
+        sourceChannel: CLAWCHAT_CHANNEL_ID,
+        sourceTool: "clawchat_router",
+      },
       SenderId: fromId || undefined,
       SenderName: resolveSenderNameFromConfig(routerMeta, routerMeta) || fromId || undefined,
       ConversationLabel: conversationLabel,
