@@ -51,6 +51,8 @@ function createMessageFlowHarness(options?: {
   const routes: Array<Record<string, unknown>> = [];
   const routerReplies: Array<Record<string, unknown>> = [];
   const texts: Array<{ target: unknown; text: string }> = [];
+  const rememberedSenders: Array<{ sessionKey: string; senderUserId: string }> = [];
+  const seededSyncs: Array<Record<string, unknown>> = [];
   const flow = createClawchatSessionMessageFlow({
     getSelfId: () => "openclaw-user",
     updateSelfIdFromClient: () => undefined,
@@ -84,8 +86,12 @@ function createMessageFlowHarness(options?: {
       texts.push({ target, text });
       return "msg-1";
     },
-    sendSessionMessageSyncToSelf: async () => undefined,
-    rememberSessionSenderUserId: () => undefined,
+    sendSessionMessageSyncToSelf: async (update) => {
+      seededSyncs.push(update as Record<string, unknown>);
+    },
+    rememberSessionSenderUserId: (params) => {
+      rememberedSenders.push(params);
+    },
     resolveSessionMapping: () =>
       options?.mappedSessionKey ? { sessionKey: options.mappedSessionKey } : null,
     applySessionMappingSignal: () => undefined,
@@ -100,6 +106,8 @@ function createMessageFlowHarness(options?: {
     routes,
     routerReplies,
     texts,
+    rememberedSenders,
+    seededSyncs,
   };
 }
 
@@ -171,6 +179,34 @@ test("group mapped session inbound preserves origin for execution while sanitizi
   assert.equal(harness.routes[0]?.to, "group-7");
   assert.equal(harness.texts.length, 1);
   assert.deepEqual(harness.texts[0]?.target, { kind: "group", id: "group-7" });
+});
+
+test("direct inbound remembers and seeds the external sender user instead of the OpenClaw user", async () => {
+  const harness = createMessageFlowHarness({
+    routeSessionKey: "agent:main:clawchat:group:parent-group",
+  });
+
+  await harness.flow.onInbound(
+    {
+      id: "msg-direct-1",
+      from: "real-user",
+      to: "openclaw-user",
+      toType: "roster",
+      content: "/subagents spawn main hi",
+      timestamp: 11111,
+    },
+    "direct",
+    createBaseAccount(),
+  );
+
+  assert.equal(harness.rememberedSenders.length >= 2, true);
+  assert.deepEqual(
+    harness.rememberedSenders.map((entry) => entry.senderUserId),
+    new Array(harness.rememberedSenders.length).fill("real-user"),
+  );
+  assert.equal(harness.seededSyncs.length, 1);
+  assert.equal(harness.seededSyncs[0]?.senderUserId, "real-user");
+  assert.equal(harness.seededSyncs[0]?.source, "control_ui_user");
 });
 
 test("direct router replies still self-loop via router_reply instead of plain outbound text", async () => {

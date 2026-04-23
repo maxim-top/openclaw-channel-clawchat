@@ -493,22 +493,22 @@ export function createClawchatSessionMessageFlow(ctx: MessageFlowContext) {
     });
 
     if (params.mode === "direct") {
-      const directChatbotId = params.dispatchTo.trim();
-      if (directChatbotId) {
+      const directSenderUserId = (params.senderId || params.targetId).trim();
+      if (directSenderUserId) {
         ctx.rememberSessionSenderUserId({
           sessionKey: persistedSessionKey,
-          senderUserId: directChatbotId,
+          senderUserId: directSenderUserId,
         });
         if (route.sessionKey && route.sessionKey !== persistedSessionKey) {
           ctx.rememberSessionSenderUserId({
             sessionKey: route.sessionKey,
-            senderUserId: directChatbotId,
+            senderUserId: directSenderUserId,
           });
         }
         if (route.mainSessionKey) {
           ctx.rememberSessionSenderUserId({
             sessionKey: route.mainSessionKey,
-            senderUserId: directChatbotId,
+            senderUserId: directSenderUserId,
           });
         }
       }
@@ -516,7 +516,7 @@ export function createClawchatSessionMessageFlow(ctx: MessageFlowContext) {
 
     await maybeSeedParentSessionMapping({
       sessionKey: route.sessionKey,
-      senderUserId: params.mode === "direct" ? params.dispatchTo : params.senderId,
+      senderUserId: params.mode === "direct" ? params.senderId || params.targetId : params.senderId,
       mappedSessionKey,
     });
 
