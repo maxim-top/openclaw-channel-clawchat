@@ -20,6 +20,7 @@ import {
   buildRouterReplyMessage,
   parseRouterDeliveryTarget,
 } from "./channel/router-target.js";
+import { shouldSkipSessionMessageSyncForRouterReply } from "./channel/session-message-sync.js";
 import { createClawchatSessionMessageFlow } from "./channel/session-message-flow.js";
 import {
   findBaseHash,
@@ -1465,6 +1466,20 @@ class ClawchatSession {
         : {};
     const role =
       typeof message?.role === "string" && message.role.trim() ? message.role.trim() : undefined;
+    if (
+      shouldSkipSessionMessageSyncForRouterReply({
+        sessionKey: normalizedSessionKey,
+        source: typeof update.source === "string" ? update.source.trim() : undefined,
+        role,
+      })
+    ) {
+      logDebug("skip session_message_sync for router reply owned by explicit router_reply delivery", {
+        sessionKey: normalizedSessionKey,
+        source: update.source,
+        role,
+      });
+      return;
+    }
     const content =
       message && Object.prototype.hasOwnProperty.call(message, "content")
         ? message.content
