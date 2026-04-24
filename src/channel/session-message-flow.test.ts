@@ -181,7 +181,7 @@ test("group mapped session inbound preserves origin for execution while sanitizi
   assert.deepEqual(harness.texts[0]?.target, { kind: "group", id: "group-7" });
 });
 
-test("group inbound stays on the root route session even if a stale mapped subagent session exists", async () => {
+test("group inbound uses mapped subagent session when group mapping points to child session", async () => {
   const harness = createMessageFlowHarness({
     mappedSessionKey: "agent:main:subagent:child-7",
     routeSessionKey: "agent:main:clawchat:group:group-7",
@@ -202,10 +202,10 @@ test("group inbound stays on the root route session even if a stale mapped subag
 
   assert.equal(harness.recorded.length, 1);
   assert.equal(harness.dispatched.length, 1);
-  assert.equal(harness.recorded[0]?.SessionKey, "agent:main:clawchat:group:group-7");
-  assert.equal(harness.dispatched[0]?.SessionKey, "agent:main:clawchat:group:group-7");
+  assert.equal(harness.recorded[0]?.SessionKey, "agent:main:subagent:child-7");
+  assert.equal(harness.dispatched[0]?.SessionKey, "agent:main:subagent:child-7");
   assert.equal(harness.routes.length, 1);
-  assert.equal(harness.routes[0]?.sessionKey, "agent:main:clawchat:group:group-7");
+  assert.equal(harness.routes[0]?.sessionKey, "agent:main:subagent:child-7");
   assert.equal(harness.dispatched[0]?.OriginatingTo, "group-7");
 });
 

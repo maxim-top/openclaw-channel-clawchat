@@ -622,6 +622,26 @@ class ClawchatSession {
     return { sessionKey: mapping.sessionKey };
   }
 
+  resolveMappedOutboundGroupTarget(appId: string, rawId: string): ClawchatMessageTarget | null {
+    const groupId = rawId.trim();
+    const openclawUserId = this.selfId.trim();
+    if (!groupId || !openclawUserId) {
+      return null;
+    }
+    const mapping = this.resolveSessionMapping({
+      appId,
+      openclawUserId,
+      groupId,
+    });
+    if (!mapping?.sessionKey) {
+      return null;
+    }
+    return {
+      kind: "group",
+      id: groupId,
+    };
+  }
+
   private applySessionMappingSignal(signal: SessionMappingSignal): void {
     const now = Date.now();
     const scopedOpenclawUserId = signal.openclawUserId?.trim() || this.selfId.trim();
@@ -2227,7 +2247,17 @@ export const clawchatPlugin: any = {
           chatId: rawTarget,
         };
       }
-      const target = normalizeTarget(to);
+      const mappedGroupTarget =
+        rawTarget && !rawTarget.includes(":")
+          ? session.resolveMappedOutboundGroupTarget(account.appId, rawTarget)
+          : null;
+      if (mappedGroupTarget) {
+        logDebug("resolved bare outbound target as group", {
+          to: rawTarget,
+          reason: "known_session_mapping",
+        });
+      }
+      const target = mappedGroupTarget || normalizeTarget(to);
       if (!target || !target.id) {
         throw new Error(`Invalid ClawChat target: ${to}`);
       }

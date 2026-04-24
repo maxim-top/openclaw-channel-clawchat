@@ -355,13 +355,7 @@ export function createClawchatSessionMessageFlow(ctx: MessageFlowContext) {
       mode: params.mode,
       targetId: params.targetId,
     });
-    const shouldForceRouteSessionForDescendantMappedSession = Boolean(
-      mappedSessionKey && mappedSessionKey.includes(":subagent:"),
-    );
-    const inboundSessionKey =
-      shouldForceRouteSessionForDescendantMappedSession
-        ? route.sessionKey
-        : mappedSessionKey || route.sessionKey;
+    const inboundSessionKey = mappedSessionKey || route.sessionKey;
     const storePath = ctx.resolveStorePath(params.cfg.session?.store, {
       agentId: route.agentId,
     });
@@ -414,13 +408,9 @@ export function createClawchatSessionMessageFlow(ctx: MessageFlowContext) {
         ? finalizedCtx.SessionKey.trim()
         : route.sessionKey;
     const updateLastRouteSessionKey =
-      (shouldForceRouteSessionForDescendantMappedSession ? route.sessionKey : mappedSessionKey) ||
-      (route.lastRoutePolicy === "main" ? route.mainSessionKey : persistedSessionKey);
+      mappedSessionKey || (route.lastRoutePolicy === "main" ? route.mainSessionKey : persistedSessionKey);
     const shouldSanitizeSessionMetadata = Boolean(
-      !shouldForceRouteSessionForDescendantMappedSession &&
-        mappedSessionKey &&
-        mappedSessionKey.trim() &&
-        mappedSessionKey.trim() !== route.sessionKey,
+      mappedSessionKey && mappedSessionKey.trim() && mappedSessionKey.trim() !== route.sessionKey,
     );
     const updateLastRoute = {
       sessionKey: updateLastRouteSessionKey,
@@ -436,8 +426,6 @@ export function createClawchatSessionMessageFlow(ctx: MessageFlowContext) {
       routeSessionKey: persistedSessionKey,
       routeMainSessionKey: route.mainSessionKey,
       mappedSessionKey: mappedSessionKey || undefined,
-      forcedRouteSessionForDescendantMappedSession:
-        shouldForceRouteSessionForDescendantMappedSession || undefined,
       updateLastRouteSessionKey,
       routeMatchedBy: route.matchedBy,
       storePath,
