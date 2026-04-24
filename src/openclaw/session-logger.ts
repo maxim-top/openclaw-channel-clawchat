@@ -204,9 +204,6 @@ function resolveUserMessageSyncSource(
   if (!message || isOpenClawGeneratedMirror(message)) {
     return null;
   }
-  if (isSubagentBootstrapUserTurn(sessionIdentity, message)) {
-    return null;
-  }
   if (messageLooksLikeClawchatInbound(message)) {
     return "im_inbound_user";
   }
@@ -214,6 +211,9 @@ function resolveUserMessageSyncSource(
   const sourceChannel = normalizeHint(provenance?.sourceChannel);
   const sourceTool = normalizeHint(provenance?.sourceTool);
   if (sourceChannel || sourceTool) {
+    if (isSubagentBootstrapUserTurn(sessionIdentity, message)) {
+      return "control_ui_user";
+    }
     return sourceChannel === "webchat" ? "control_ui_user" : null;
   }
   return "control_ui_user";

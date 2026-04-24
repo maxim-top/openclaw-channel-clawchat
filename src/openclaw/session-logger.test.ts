@@ -27,7 +27,7 @@ function createRuntime() {
   };
 }
 
-test("subagent bootstrap user turn is observed but not forwarded as session sync", async () => {
+test("subagent bootstrap user turn is observed and forwarded as control_ui_user", async () => {
   resetGlobalOpenClawSessionLoggerStatus();
   const harness = createRuntime();
   const forwarded: Array<Record<string, unknown>> = [];
@@ -51,7 +51,8 @@ test("subagent bootstrap user turn is observed but not forwarded as session sync
   });
 
   dispose();
-  assert.equal(forwarded.length, 0);
+  assert.equal(forwarded.length, 1);
+  assert.equal(forwarded[0]?.source, "control_ui_user");
 });
 
 test("normal control UI user turns still forward", async () => {
