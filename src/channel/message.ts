@@ -45,6 +45,14 @@ export type SessionMappingSignal = {
   openclawUserId?: string;
 };
 
+export type SessionMessageSyncSignal = {
+  type: "session_message_sync";
+  session?: string;
+  source?: string;
+  role?: string;
+  messageId?: string;
+};
+
 export function parseExtValue(value: unknown): Record<string, unknown> | null {
   if (!value) {
     return null;
@@ -68,9 +76,25 @@ export function removeOpenclawEdgeMention(content: string, toUserNickname: strin
     return content;
   }
   const escapedNickname = nickname.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-  const withoutPrefix = content.replace(new RegExp(`^@${escapedNickname}(?:\\u2005| )+`), "");
-  const withoutSuffix = withoutPrefix.replace(new RegExp(`@${escapedNickname}(?:\\u2005| )*$`), "");
+  const mentionGap = "(?:[\\s\\u2000-\\u200D\\u2060\\u3000])+";
+  const withoutPrefix = content.replace(new RegExp(`^@${escapedNickname}${mentionGap}`), "");
+  const withoutSuffix = withoutPrefix.replace(
+    new RegExp(`@${escapedNickname}${mentionGap}?$`),
+    "",
+  );
   return withoutSuffix.trim();
+}
+
+export function stripLeadingAtMentions(content: string): string {
+  let current = content;
+  const leadingMentionPattern = /^@\S+(?:[\s\u2000-\u200D\u2060\u3000])+/;
+  while (true) {
+    const next = current.replace(leadingMentionPattern, "");
+    if (next === current) {
+      return current.trimStart();
+    }
+    current = next;
+  }
 }
 
 export function extractConfigPatchRaw(
@@ -257,6 +281,42 @@ export function extractSessionMappingSignal(
       mappings,
       openclawUserId:
         String(openclawObj.openclaw_user_id ?? openclawObj.openclawUserId ?? "").trim() ||
+        undefined,
+    };
+  }
+  return null;
+}
+
+export function extractSessionMessageSyncSignal(
+  eventAny: Record<string, unknown>,
+  meta: Record<string, unknown>,
+): SessionMessageSyncSignal | null {
+  const payload = (eventAny.payload ?? meta.payload) as Record<string, unknown> | undefined;
+  const extObjCandidates = [
+    parseExtValue(eventAny.ext),
+    parseExtValue(meta.ext),
+    parseExtValue(payload?.ext),
+  ].filter(Boolean) as Record<string, unknown>[];
+
+  for (const extObj of extObjCandidates) {
+    const openclaw = extObj.openclaw;
+    if (!openclaw || typeof openclaw !== "object" || Array.isArray(openclaw)) {
+      continue;
+    }
+    const openclawObj = openclaw as Record<string, unknown>;
+    if (String(openclawObj.type ?? "").trim() !== "session_message_sync") {
+      continue;
+    }
+    const message = parseMetaMessage(openclawObj.message);
+    return {
+      type: "session_message_sync",
+      session: String(openclawObj.session ?? openclawObj.sessionKey ?? "").trim() || undefined,
+      source: String(openclawObj.source ?? "").trim() || undefined,
+      role: String(message?.role ?? "").trim() || undefined,
+      messageId:
+        pickId(openclawObj.message_id) ||
+        pickId(openclawObj.messageId) ||
+        pickId(message?.id) ||
         undefined,
     };
   }

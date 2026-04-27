@@ -4,10 +4,12 @@ import {
   extractPresetPromptSync,
   extractRouterSignal,
   extractSessionMappingSignal,
+  extractSessionMessageSyncSignal,
   extractText,
   isCommandOuterMessage,
   isHistoryEvent,
   removeOpenclawEdgeMention,
+  stripLeadingAtMentions,
   resolveRouterReplyTargetSnapshot,
   type PresetPromptSyncPayload,
   type RouterReplyTargetSnapshot,
@@ -751,7 +753,8 @@ export function createClawchatSessionMessageFlow(ctx: MessageFlowContext) {
     const routerMeta = routerMessage as Record<string, unknown>;
     const toUserNickname = resolveToUserNicknameFromConfig(routerMeta, routerMeta);
     const cleanedBody = removeOpenclawEdgeMention(body, toUserNickname);
-    const trimmedBody = cleanedBody.trim();
+    const commandBody = stripLeadingAtMentions(cleanedBody);
+    const trimmedBody = commandBody.trim();
     const isSlashCommand = trimmedBody.startsWith("/");
     const replyTo = replyTargetSnapshot.replyId;
     const routerGroupId = parseGroupId(
@@ -794,8 +797,8 @@ export function createClawchatSessionMessageFlow(ctx: MessageFlowContext) {
     }
     const bodyToDispatch =
       replyTargetSnapshot.replyKind === "group"
-        ? buildBodyWithPendingGroupContext(replyTo, cleanedBody, isSlashCommand)
-        : cleanedBody;
+        ? buildBodyWithPendingGroupContext(replyTo, commandBody, isSlashCommand)
+        : commandBody;
     const bodyWithKnowledge =
       knowledge.trim().length > 0
         ? [
@@ -1115,8 +1118,36 @@ export function createClawchatSessionMessageFlow(ctx: MessageFlowContext) {
       const presetPromptSync = extractPresetPromptSync(eventAny, meta);
       const routerSignal = extractRouterSignal(eventAny, meta);
       const sessionMappingSignal = extractSessionMappingSignal(eventAny, meta);
+      const sessionMessageSyncSignal = extractSessionMessageSyncSignal(eventAny, meta);
+      if (sessionMessageSyncSignal && !isCommandOuterMessage(eventAny, meta)) {
+        logDebug("skip inbound session_message_sync: outer type is not command", {
+          senderId,
+          toId: toIdRaw,
+          targetId,
+          mode,
+          selfId,
+          session: sessionMessageSyncSignal.session,
+          source: sessionMessageSyncSignal.source,
+          role: sessionMessageSyncSignal.role,
+          messageId: sessionMessageSyncSignal.messageId,
+        });
+        return;
+      }
       if (mode === "direct" && senderId && toIdRaw && senderId === toIdRaw) {
         const isSelfLoopback = Boolean(selfId && senderId === selfId);
+        if (sessionMessageSyncSignal) {
+          logDebug("consume loopback session_message_sync control envelope", {
+            senderId,
+            toId: toIdRaw,
+            selfId,
+            isSelfLoopback,
+            session: sessionMessageSyncSignal.session,
+            source: sessionMessageSyncSignal.source,
+            role: sessionMessageSyncSignal.role,
+            messageId: sessionMessageSyncSignal.messageId,
+          });
+          return;
+        }
         if (isSelfLoopback && account.allowManage && configPatchRaw) {
           try {
             await ctx.sendConfigPatchMarkerToSelf({
@@ -1316,6 +1347,19 @@ export function createClawchatSessionMessageFlow(ctx: MessageFlowContext) {
         });
         return;
       }
+      if (sessionMessageSyncSignal) {
+        logDebug("skip inbound session_message_sync control envelope", {
+          senderId,
+          toId: toIdRaw,
+          targetId,
+          mode,
+          session: sessionMessageSyncSignal.session,
+          source: sessionMessageSyncSignal.source,
+          role: sessionMessageSyncSignal.role,
+          messageId: sessionMessageSyncSignal.messageId,
+        });
+        return;
+      }
       if (senderId && selfId && senderId === selfId) {
         logDebug("skip self/multi-device sync message", {
           senderId,
@@ -1333,7 +1377,8 @@ export function createClawchatSessionMessageFlow(ctx: MessageFlowContext) {
       }
       const toUserNickname = resolveToUserNicknameFromConfig(eventAny, meta);
       const cleanedBody = removeOpenclawEdgeMention(body, toUserNickname);
-      const isSlashCommand = cleanedBody.startsWith("/");
+      const commandBody = stripLeadingAtMentions(cleanedBody);
+      const isSlashCommand = commandBody.startsWith("/");
       const timestampNum = Number(
         eventAny.timestamp ?? meta.timestamp ?? (eventAny as { ts?: unknown }).ts ?? Date.now(),
       );
@@ -1368,7 +1413,7 @@ export function createClawchatSessionMessageFlow(ctx: MessageFlowContext) {
             groupId,
             senderId,
             senderName: resolveSenderNameFromConfig(eventAny, meta) || undefined,
-            body: cleanedBody,
+            body: commandBody,
             timestamp: Number.isFinite(timestampNum) ? timestampNum : Date.now(),
           });
           logDebug("skip group inbound: mention required", {
@@ -1434,7 +1479,7 @@ export function createClawchatSessionMessageFlow(ctx: MessageFlowContext) {
       }
       let bodyToDispatch = cleanedBody;
       if (mode === "group") {
-        bodyToDispatch = buildBodyWithPendingGroupContext(groupId, cleanedBody, isSlashCommand);
+        bodyToDispatch = buildBodyWithPendingGroupContext(groupId, commandBody, isSlashCommand);
       }
       const dispatchTo = mode === "group" ? groupId : toIdRaw || account.username;
       const outboundTarget: ClawchatMessageTarget =
@@ -1458,7 +1503,7 @@ export function createClawchatSessionMessageFlow(ctx: MessageFlowContext) {
         dispatchTo,
         rawBody: body,
         bodyForAgent: bodyToDispatch,
-        commandBody: cleanedBody,
+        commandBody,
         commandAuthorized: isSlashCommand,
         messageId: messageSid || undefined,
         timestamp: Number.isFinite(timestampNum) ? timestampNum : Date.now(),

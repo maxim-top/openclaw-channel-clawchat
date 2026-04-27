@@ -111,6 +111,91 @@ function createMessageFlowHarness(options?: {
   };
 }
 
+function createSessionMessageSyncExt() {
+  return JSON.stringify({
+    openclaw: {
+      type: "session_message_sync",
+      session: "agent:main:clawchat-router:group:group-42",
+      source: "control_ui_reply",
+      messageId: "sync-reply-1",
+      message: {
+        role: "assistant",
+        content: "assistant reply must stay a control envelope",
+      },
+    },
+  });
+}
+
+test("self loopback session_message_sync command is consumed as a control envelope", async () => {
+  const harness = createMessageFlowHarness();
+
+  await harness.flow.onInbound(
+    {
+      id: "sync-loopback-1",
+      from: "openclaw-user",
+      to: "openclaw-user",
+      type: "command",
+      toType: "roster",
+      content: "must not dispatch",
+      ext: createSessionMessageSyncExt(),
+      timestamp: 1001,
+    },
+    "direct",
+    createBaseAccount(),
+  );
+
+  assert.equal(harness.recorded.length, 0);
+  assert.equal(harness.dispatched.length, 0);
+  assert.equal(harness.texts.length, 0);
+  assert.equal(harness.routerReplies.length, 0);
+});
+
+test("non-command session_message_sync loopback is dropped before normal inbound", async () => {
+  const harness = createMessageFlowHarness();
+
+  await harness.flow.onInbound(
+    {
+      id: "sync-loopback-text-1",
+      from: "openclaw-user",
+      to: "openclaw-user",
+      type: "text",
+      toType: "roster",
+      content: "must not dispatch",
+      ext: createSessionMessageSyncExt(),
+      timestamp: 1002,
+    },
+    "direct",
+    createBaseAccount(),
+  );
+
+  assert.equal(harness.recorded.length, 0);
+  assert.equal(harness.dispatched.length, 0);
+  assert.equal(harness.texts.length, 0);
+});
+
+test("non-self session_message_sync envelope is not treated as user text", async () => {
+  const harness = createMessageFlowHarness();
+
+  await harness.flow.onInbound(
+    {
+      id: "sync-non-self-1",
+      from: "other-user",
+      to: "openclaw-user",
+      type: "command",
+      toType: "roster",
+      content: "must not dispatch",
+      ext: createSessionMessageSyncExt(),
+      timestamp: 1003,
+    },
+    "direct",
+    createBaseAccount(),
+  );
+
+  assert.equal(harness.recorded.length, 0);
+  assert.equal(harness.dispatched.length, 0);
+  assert.equal(harness.texts.length, 0);
+});
+
 test("router_request keeps origin in execution ctx while sanitizing persisted mapped session metadata", async () => {
   const harness = createMessageFlowHarness({
     mappedSessionKey: "agent:main:clawchat:group:group-42",

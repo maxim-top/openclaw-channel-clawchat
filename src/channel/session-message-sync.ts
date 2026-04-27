@@ -1,17 +1,42 @@
-export function shouldSkipSessionMessageSyncForRouterReply(params: {
-  sessionKey?: string;
-  source?: string;
-  role?: string;
-}): boolean {
-  const sessionKey = typeof params.sessionKey === "string" ? params.sessionKey.trim() : "";
-  const source = typeof params.source === "string" ? params.source.trim() : "";
-  const role = typeof params.role === "string" ? params.role.trim().toLowerCase() : "";
+import { asPlainObject } from "../shared/utils.js";
 
-  if (!sessionKey || source !== "control_ui_reply" || role !== "assistant") {
+export function extractSessionSyncText(value: unknown): string {
+  if (typeof value === "string") {
+    return value;
+  }
+  if (Array.isArray(value)) {
+    return value.map((item) => extractSessionSyncText(item)).filter(Boolean).join("\n\n");
+  }
+  const obj = asPlainObject(value);
+  if (!obj) {
+    return "";
+  }
+  if (typeof obj.text === "string") {
+    return obj.text;
+  }
+  if (Object.prototype.hasOwnProperty.call(obj, "content")) {
+    return extractSessionSyncText(obj.content);
+  }
+  return "";
+}
+
+export function normalizeSessionSyncText(value: unknown): string {
+  return extractSessionSyncText(value)
+    .replace(/\s+/g, "")
+    .replace(/[，。！？、；：“”"'`~!?,.;:]/g, "")
+    .trim();
+}
+
+export function sessionSyncTextsLookDuplicated(left: unknown, right: unknown): boolean {
+  const a = normalizeSessionSyncText(left);
+  const b = normalizeSessionSyncText(right);
+  if (!a || !b) {
     return false;
   }
-
-  return (
-    sessionKey.includes(":clawchat-router:group:") || sessionKey.includes(":clawchat-router:direct:")
-  );
+  const shorter = a.length <= b.length ? a : b;
+  const longer = a.length <= b.length ? b : a;
+  if (shorter.length < 12) {
+    return shorter === longer;
+  }
+  return longer.includes(shorter);
 }

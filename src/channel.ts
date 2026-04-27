@@ -20,7 +20,9 @@ import {
   buildRouterReplyMessage,
   parseRouterDeliveryTarget,
 } from "./channel/router-target.js";
-import { shouldSkipSessionMessageSyncForRouterReply } from "./channel/session-message-sync.js";
+import {
+  extractSessionSyncText,
+} from "./channel/session-message-sync.js";
 import { createClawchatSessionMessageFlow } from "./channel/session-message-flow.js";
 import {
   findBaseHash,
@@ -118,6 +120,7 @@ const RECONNECT_BASE_DELAY_MS = 2_000;
 const RECONNECT_MAX_DELAY_MS = 30_000;
 const CONFIG_PATCH_RETRY_MAX = 3;
 const CONFIG_PATCH_DEDUPE_TTL_MS = 60_000;
+const SUBAGENT_PARENT_REPLY_SUPPRESSION_TTL_MS = 60_000;
 const CLAWCHAT_MANAGED_DIR = "clawchat";
 const CLAWCHAT_MANAGED_AGENTS_PATH = `${CLAWCHAT_MANAGED_DIR}/AGENTS.md`;
 const DEFAULT_AGENT_ID = "main";
@@ -365,6 +368,14 @@ class ClawchatSession {
     string,
     { senderUserId: string; updatedAt: number }
   >();
+  private recentSubagentAssistantReplyByParentSessionKey = new Map<
+    string,
+    {
+      childSessionKey: string;
+      updatedAt: number;
+      pendingParentSuppression: boolean;
+    }
+  >();
   private missingSessionMappingSeedPromise: Promise<void> | null = null;
   private readonly messageFlow = createClawchatSessionMessageFlow({
     getSelfId: () => this.selfId,
@@ -438,6 +449,60 @@ class ClawchatSession {
       }
     }
     return undefined;
+  }
+
+  private cleanupRecentSubagentAssistantReplies(now = Date.now()): void {
+    for (const [sessionKey, entry] of this.recentSubagentAssistantReplyByParentSessionKey.entries()) {
+      if (now - entry.updatedAt > SUBAGENT_PARENT_REPLY_SUPPRESSION_TTL_MS) {
+        this.recentSubagentAssistantReplyByParentSessionKey.delete(sessionKey);
+      }
+    }
+  }
+
+  private rememberSubagentAssistantReplyForParentSuppression(params: {
+    childSessionKey: string;
+    lineage: { parentSessionKey?: string; rootSessionKey?: string };
+  }): void {
+    const childSessionKey = this.normalizeOptionalSessionKey(params.childSessionKey);
+    if (!childSessionKey || !childSessionKey.includes(":subagent:")) {
+      return;
+    }
+    const now = Date.now();
+    this.cleanupRecentSubagentAssistantReplies(now);
+    const parentCandidates = [
+      this.normalizeOptionalSessionKey(params.lineage.parentSessionKey),
+      this.normalizeOptionalSessionKey(params.lineage.rootSessionKey),
+    ].filter((value): value is string => Boolean(value));
+    for (const parentSessionKey of parentCandidates) {
+      if (parentSessionKey === childSessionKey || parentSessionKey.includes(":subagent:")) {
+        continue;
+      }
+      this.recentSubagentAssistantReplyByParentSessionKey.set(parentSessionKey, {
+        childSessionKey,
+        updatedAt: now,
+        pendingParentSuppression: true,
+      });
+    }
+  }
+
+  private shouldSuppressParentAssistantReplyAfterSubagent(params: {
+    sessionKey: string;
+  }): { childSessionKey: string } | null {
+    const sessionKey = this.normalizeOptionalSessionKey(params.sessionKey);
+    if (!sessionKey || sessionKey.includes(":subagent:")) {
+      return null;
+    }
+    this.cleanupRecentSubagentAssistantReplies();
+    const previous = this.recentSubagentAssistantReplyByParentSessionKey.get(sessionKey);
+    if (!previous?.pendingParentSuppression) {
+      return null;
+    }
+    this.recentSubagentAssistantReplyByParentSessionKey.set(sessionKey, {
+      ...previous,
+      pendingParentSuppression: false,
+      updatedAt: Date.now(),
+    });
+    return { childSessionKey: previous.childSessionKey };
   }
 
   private buildLocalSessionStorePath(cfg: OpenClawConfig): string {
@@ -1486,20 +1551,6 @@ class ClawchatSession {
         : {};
     const role =
       typeof message?.role === "string" && message.role.trim() ? message.role.trim() : undefined;
-    if (
-      shouldSkipSessionMessageSyncForRouterReply({
-        sessionKey: normalizedSessionKey,
-        source: typeof update.source === "string" ? update.source.trim() : undefined,
-        role,
-      })
-    ) {
-      logDebug("skip session_message_sync for router reply owned by explicit router_reply delivery", {
-        sessionKey: normalizedSessionKey,
-        source: update.source,
-        role,
-      });
-      return;
-    }
     const content =
       message && Object.prototype.hasOwnProperty.call(message, "content")
         ? message.content
@@ -1541,6 +1592,25 @@ class ClawchatSession {
         rootSessionKey: payloadLineage.rootSessionKey,
       });
     }
+    const normalizedSource = typeof update.source === "string" ? update.source.trim() : undefined;
+    const normalizedRole = typeof role === "string" ? role.trim().toLowerCase() : "";
+    if (normalizedSource === "control_ui_reply" && normalizedRole === "assistant") {
+      const parentSuppression = this.shouldSuppressParentAssistantReplyAfterSubagent({
+        sessionKey: payloadSessionKey,
+      });
+      if (parentSuppression) {
+        logDebug("suppress parent session_message_sync after subagent assistant result", {
+          sessionKey: payloadSessionKey,
+          childSessionKey: parentSuppression.childSessionKey,
+          textPreview: extractSessionSyncText(content).slice(0, 80),
+        });
+        return;
+      }
+      this.rememberSubagentAssistantReplyForParentSuppression({
+        childSessionKey: payloadSessionKey,
+        lineage: payloadLineage,
+      });
+    }
     const rememberedSenderUserId =
       typeof update.senderUserId === "string" && update.senderUserId.trim()
         ? update.senderUserId.trim()
@@ -1555,6 +1625,9 @@ class ClawchatSession {
     }
     const normalizedPayload = {
       session: payloadSessionKey,
+      ...(typeof update.messageId === "string" && update.messageId.trim()
+        ? { message_id: update.messageId.trim() }
+        : {}),
       ...(payloadLineage.parentSessionKey
         ? { parent_session: payloadLineage.parentSessionKey }
         : {}),
@@ -1565,9 +1638,7 @@ class ClawchatSession {
         Number.isFinite(payloadLineage.spawnDepth)
           ? { spawn_depth: payloadLineage.spawnDepth }
           : {}),
-      ...(typeof update.source === "string" && update.source.trim()
-        ? { source: update.source.trim() }
-        : {}),
+      ...(normalizedSource ? { source: normalizedSource } : {}),
       ...(rememberedSenderUserId
         ? { sender_user_id: rememberedSenderUserId }
         : {}),
