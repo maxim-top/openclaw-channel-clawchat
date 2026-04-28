@@ -158,6 +158,16 @@ function messageLooksLikeClawchatInbound(message: Record<string, unknown> | null
   ) {
     return true;
   }
+  return false;
+}
+
+function resolveCurrentMessageUserSyncSource(
+  sessionIdentity: string,
+  message: Record<string, unknown> | null,
+): SessionMessageSyncSource | null {
+  if (!message) {
+    return null;
+  }
   const provenanceCandidates = [
     asPlainObject(message.provenance),
     asPlainObject(message.InputProvenance),
@@ -166,15 +176,22 @@ function messageLooksLikeClawchatInbound(message: Record<string, unknown> | null
     if (!provenance) {
       continue;
     }
-    if (hasClawchatChannelHint(provenance.sourceChannel)) {
-      return true;
-    }
+    const sourceChannel = normalizeHint(provenance.sourceChannel);
     const sourceTool = normalizeHint(provenance.sourceTool);
-    if (sourceTool.includes("clawchat") || sourceTool.includes("lanying")) {
-      return true;
+    if (sourceChannel === "webchat") {
+      return "control_ui_user";
+    }
+    if (hasClawchatChannelHint(sourceChannel) || sourceTool.includes("clawchat") || sourceTool.includes("lanying")) {
+      return "im_inbound_user";
+    }
+    if (sourceChannel || sourceTool) {
+      if (isSubagentBootstrapUserTurn(sessionIdentity, message)) {
+        return "control_ui_user";
+      }
+      return null;
     }
   }
-  return false;
+  return null;
 }
 
 function isSubagentBootstrapUserTurn(
@@ -215,19 +232,11 @@ function resolveUserMessageSyncSource(
   if (!message || isOpenClawGeneratedMirror(message)) {
     return null;
   }
-  if (messageLooksLikeClawchatInbound(message)) {
-    return "im_inbound_user";
+  const currentMessageSource = resolveCurrentMessageUserSyncSource(sessionIdentity, message);
+  if (currentMessageSource) {
+    return currentMessageSource;
   }
-  const provenance = asPlainObject(message.provenance);
-  const sourceChannel = normalizeHint(provenance?.sourceChannel);
-  const sourceTool = normalizeHint(provenance?.sourceTool);
-  if (sourceChannel || sourceTool) {
-    if (isSubagentBootstrapUserTurn(sessionIdentity, message)) {
-      return "control_ui_user";
-    }
-    return sourceChannel === "webchat" ? "control_ui_user" : null;
-  }
-  return "control_ui_user";
+  return messageLooksLikeClawchatInbound(message) ? "im_inbound_user" : "control_ui_user";
 }
 
 function resolveReplySyncSource(

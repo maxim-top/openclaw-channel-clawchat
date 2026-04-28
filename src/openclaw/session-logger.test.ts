@@ -110,6 +110,47 @@ test("normal control UI user and assistant turns both forward to IM", async () =
   );
 });
 
+for (const [name, sessionFile, originatingTo] of [
+  ["direct", "agent:main:clawchat:direct:user-1", "user-1"],
+  ["group", "agent:main:clawchat:group:group-1", "group-1"],
+  ["router direct", "agent:main:clawchat-router:direct:user-1", "router:direct:user-1"],
+  ["router group", "agent:main:clawchat-router:group:group-1", "router:group:group-1"],
+] as const) {
+  test(`control UI turns in a ClawChat ${name} session still forward to IM`, async () => {
+    const harness = installForwardCollector();
+
+    harness.emit({
+      sessionFile,
+      messageId: `control-in-mapped-${name}-user-1`,
+      message: {
+        role: "user",
+        content: `OpenClaw side follow-up in an IM-created ${name} session`,
+        OriginatingChannel: "clawchat",
+        OriginatingTo: originatingTo,
+        Provider: "clawchat",
+        Surface: "clawchat",
+        provenance: {
+          sourceChannel: "webchat",
+        },
+      },
+    });
+    harness.emit({
+      sessionFile,
+      messageId: `control-in-mapped-${name}-assistant-1`,
+      message: {
+        role: "assistant",
+        content: "assistant reply should still sync to IM",
+      },
+    });
+
+    harness.dispose();
+    assert.deepEqual(
+      harness.forwarded.map((update) => update.source),
+      ["control_ui_user", "control_ui_reply"],
+    );
+  });
+}
+
 test("control UI subagent bootstrap and assistant result both forward to IM", async () => {
   const harness = installForwardCollector();
 
