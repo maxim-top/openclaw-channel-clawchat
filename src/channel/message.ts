@@ -53,6 +53,14 @@ export type SessionMessageSyncSignal = {
   messageId?: string;
 };
 
+export type SessionSyncDeliverySignal = {
+  type: "session_sync_delivery";
+  session?: string;
+  source?: string;
+  role?: string;
+  messageId?: string;
+};
+
 export function parseExtValue(value: unknown): Record<string, unknown> | null {
   if (!value) {
     return null;
@@ -317,6 +325,40 @@ export function extractSessionMessageSyncSignal(
         pickId(openclawObj.message_id) ||
         pickId(openclawObj.messageId) ||
         pickId(message?.id) ||
+        undefined,
+    };
+  }
+  return null;
+}
+
+export function extractSessionSyncDeliverySignal(
+  eventAny: Record<string, unknown>,
+  meta: Record<string, unknown>,
+): SessionSyncDeliverySignal | null {
+  const payload = (eventAny.payload ?? meta.payload) as Record<string, unknown> | undefined;
+  const extObjCandidates = [
+    parseExtValue(eventAny.ext),
+    parseExtValue(meta.ext),
+    parseExtValue(payload?.ext),
+  ].filter(Boolean) as Record<string, unknown>[];
+
+  for (const extObj of extObjCandidates) {
+    const openclaw = extObj.openclaw;
+    if (!openclaw || typeof openclaw !== "object" || Array.isArray(openclaw)) {
+      continue;
+    }
+    const openclawObj = openclaw as Record<string, unknown>;
+    if (String(openclawObj.type ?? "").trim() !== "session_sync_delivery") {
+      continue;
+    }
+    return {
+      type: "session_sync_delivery",
+      session: String(openclawObj.session ?? openclawObj.sessionKey ?? "").trim() || undefined,
+      source: String(openclawObj.source ?? "").trim() || undefined,
+      role: String(openclawObj.role ?? "").trim() || undefined,
+      messageId:
+        pickId(openclawObj.message_id) ||
+        pickId(openclawObj.messageId) ||
         undefined,
     };
   }

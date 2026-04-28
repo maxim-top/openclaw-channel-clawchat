@@ -126,6 +126,18 @@ function createSessionMessageSyncExt() {
   });
 }
 
+function createSessionSyncDeliveryExt() {
+  return JSON.stringify({
+    openclaw: {
+      type: "session_sync_delivery",
+      session: "agent:main:clawchat:direct:other-user",
+      message_id: "delivery-1",
+      source: "control_ui_reply",
+      role: "assistant",
+    },
+  });
+}
+
 test("self loopback session_message_sync command is consumed as a control envelope", async () => {
   const harness = createMessageFlowHarness();
 
@@ -217,6 +229,74 @@ test("non-command inbound keeps normal processing even when ext carries session_
   assert.equal(harness.recorded.length, 1);
   assert.equal(harness.dispatched.length, 1);
   assert.equal(harness.texts.length, 1);
+});
+
+test("self-sent direct text delivery is not dispatched back into OpenClaw", async () => {
+  const harness = createMessageFlowHarness();
+
+  await harness.flow.onInbound(
+    {
+      id: "self-visible-direct-1",
+      from: "openclaw-user",
+      to: "other-user",
+      type: "text",
+      toType: "roster",
+      content: "visible sync delivery must not trigger another reply",
+      timestamp: 1005,
+    },
+    "direct",
+    createBaseAccount(),
+  );
+
+  assert.equal(harness.recorded.length, 0);
+  assert.equal(harness.dispatched.length, 0);
+  assert.equal(harness.texts.length, 0);
+});
+
+test("self-sent group text delivery is not dispatched back into OpenClaw", async () => {
+  const harness = createMessageFlowHarness();
+
+  await harness.flow.onInbound(
+    {
+      id: "self-visible-group-1",
+      from: "openclaw-user",
+      to: "group-42",
+      type: "text",
+      toType: "group",
+      content: "visible group sync delivery must not trigger another reply",
+      timestamp: 1006,
+    },
+    "group",
+    createBaseAccount(),
+    "onGroupMessage",
+  );
+
+  assert.equal(harness.recorded.length, 0);
+  assert.equal(harness.dispatched.length, 0);
+  assert.equal(harness.texts.length, 0);
+});
+
+test("marked session sync delivery text is not dispatched even if sender is not self", async () => {
+  const harness = createMessageFlowHarness();
+
+  await harness.flow.onInbound(
+    {
+      id: "marked-visible-direct-1",
+      from: "other-device-or-relay",
+      to: "openclaw-user",
+      type: "text",
+      toType: "roster",
+      content: "marked visible sync delivery must not trigger another reply",
+      ext: createSessionSyncDeliveryExt(),
+      timestamp: 1007,
+    },
+    "direct",
+    createBaseAccount(),
+  );
+
+  assert.equal(harness.recorded.length, 0);
+  assert.equal(harness.dispatched.length, 0);
+  assert.equal(harness.texts.length, 0);
 });
 
 test("native mentioned slash command dispatches cleaned command while preserving raw text", async () => {

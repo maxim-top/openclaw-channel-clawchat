@@ -4,6 +4,7 @@ import {
   extractPresetPromptSync,
   extractRouterSignal,
   extractSessionMappingSignal,
+  extractSessionSyncDeliverySignal,
   extractSessionMessageSyncSignal,
   extractText,
   isCommandOuterMessage,
@@ -1130,9 +1131,24 @@ export function createClawchatSessionMessageFlow(ctx: MessageFlowContext) {
       const presetPromptSync = extractPresetPromptSync(eventAny, meta);
       const routerSignal = extractRouterSignal(eventAny, meta);
       const sessionMappingSignal = extractSessionMappingSignal(eventAny, meta);
+      const sessionSyncDeliverySignal = extractSessionSyncDeliverySignal(eventAny, meta);
       const sessionMessageSyncSignal = extractSessionMessageSyncSignal(eventAny, meta);
       const isCommandOuter = isCommandOuterMessage(eventAny, meta);
       const isSessionMessageSyncControlEnvelope = sessionMessageSyncSignal && isCommandOuter;
+      if (sessionSyncDeliverySignal) {
+        logDebug("skip inbound session_sync_delivery visible message", {
+          senderId,
+          toId: toIdRaw,
+          targetId,
+          mode,
+          selfId,
+          session: sessionSyncDeliverySignal.session,
+          source: sessionSyncDeliverySignal.source,
+          role: sessionSyncDeliverySignal.role,
+          messageId: sessionSyncDeliverySignal.messageId,
+        });
+        return;
+      }
       if (sessionMessageSyncSignal && !isCommandOuter) {
         logDebug("ignore inbound session_message_sync hint: outer type is not command", {
           senderId,

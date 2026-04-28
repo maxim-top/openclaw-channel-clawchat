@@ -5,6 +5,7 @@ import test from "node:test";
 
 import {
   extractSessionMessageSyncSignal,
+  extractSessionSyncDeliverySignal,
   removeOpenclawEdgeMention,
   stripLeadingAtMentions,
 } from "./message.js";
@@ -94,6 +95,34 @@ test("non-session sync openclaw envelopes are ignored by the sync extractor", ()
       {},
     ),
     null,
+  );
+});
+
+test("session sync delivery marker is parsed from visible text messages", () => {
+  assert.deepEqual(
+    extractSessionSyncDeliverySignal(
+      {
+        type: "text",
+        content: "assistant reply",
+        ext: JSON.stringify({
+          openclaw: {
+            type: "session_sync_delivery",
+            session: "agent:main:clawchat:direct:user-1",
+            message_id: "delivery-1",
+            source: "control_ui_reply",
+            role: "assistant",
+          },
+        }),
+      },
+      {},
+    ),
+    {
+      type: "session_sync_delivery",
+      session: "agent:main:clawchat:direct:user-1",
+      source: "control_ui_reply",
+      role: "assistant",
+      messageId: "delivery-1",
+    },
   );
 });
 
