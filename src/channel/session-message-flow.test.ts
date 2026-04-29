@@ -138,6 +138,20 @@ function createSessionSyncDeliveryExt() {
   });
 }
 
+function createImReplyDeliveryExt() {
+  return JSON.stringify({
+    openclaw: {
+      type: "im_reply_delivery",
+      source: "im_reply",
+      role: "assistant",
+    },
+    ai: {
+      role: "ai",
+      ai_generate: false,
+    },
+  });
+}
+
 test("self loopback session_message_sync command is consumed as a control envelope", async () => {
   const harness = createMessageFlowHarness();
 
@@ -289,6 +303,29 @@ test("marked session sync delivery text is not dispatched even if sender is not 
       content: "marked visible sync delivery must not trigger another reply",
       ext: createSessionSyncDeliveryExt(),
       timestamp: 1007,
+    },
+    "direct",
+    createBaseAccount(),
+  );
+
+  assert.equal(harness.recorded.length, 0);
+  assert.equal(harness.dispatched.length, 0);
+  assert.equal(harness.texts.length, 0);
+});
+
+test("marked im reply delivery text is not dispatched even if sender is not self", async () => {
+  const harness = createMessageFlowHarness();
+
+  await harness.flow.onInbound(
+    {
+      id: "marked-visible-im-reply-1",
+      from: "other-device-or-relay",
+      to: "openclaw-user",
+      type: "text",
+      toType: "roster",
+      content: "marked visible IM reply delivery must not trigger another reply",
+      ext: createImReplyDeliveryExt(),
+      timestamp: 1008,
     },
     "direct",
     createBaseAccount(),

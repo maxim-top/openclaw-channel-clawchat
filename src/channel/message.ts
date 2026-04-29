@@ -54,7 +54,7 @@ export type SessionMessageSyncSignal = {
 };
 
 export type SessionSyncDeliverySignal = {
-  type: "session_sync_delivery";
+  type: "session_sync_delivery" | "im_reply_delivery";
   session?: string;
   source?: string;
   role?: string;
@@ -348,11 +348,12 @@ export function extractSessionSyncDeliverySignal(
       continue;
     }
     const openclawObj = openclaw as Record<string, unknown>;
-    if (String(openclawObj.type ?? "").trim() !== "session_sync_delivery") {
+    const openclawType = String(openclawObj.type ?? "").trim();
+    if (openclawType !== "session_sync_delivery" && openclawType !== "im_reply_delivery") {
       continue;
     }
     return {
-      type: "session_sync_delivery",
+      type: openclawType,
       session: String(openclawObj.session ?? openclawObj.sessionKey ?? "").trim() || undefined,
       source: String(openclawObj.source ?? "").trim() || undefined,
       role: String(openclawObj.role ?? "").trim() || undefined,

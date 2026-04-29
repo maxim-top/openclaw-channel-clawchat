@@ -126,6 +126,32 @@ test("session sync delivery marker is parsed from visible text messages", () => 
   );
 });
 
+test("im reply delivery marker is parsed as a no-reentry visible delivery", () => {
+  assert.deepEqual(
+    extractSessionSyncDeliverySignal(
+      {
+        type: "text",
+        content: "assistant reply",
+        ext: JSON.stringify({
+          openclaw: {
+            type: "im_reply_delivery",
+            source: "im_reply",
+            role: "assistant",
+          },
+        }),
+      },
+      {},
+    ),
+    {
+      type: "im_reply_delivery",
+      session: undefined,
+      source: "im_reply",
+      role: "assistant",
+      messageId: undefined,
+    },
+  );
+});
+
 test("session sync text helpers flatten structured content and match parent follow-up drift", () => {
   const childResult = [
     {

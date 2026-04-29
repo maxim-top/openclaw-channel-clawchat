@@ -1163,7 +1163,8 @@ export function createClawchatSessionMessageFlow(ctx: MessageFlowContext) {
       const isCommandOuter = isCommandOuterMessage(eventAny, meta);
       const isSessionMessageSyncControlEnvelope = sessionMessageSyncSignal && isCommandOuter;
       if (sessionSyncDeliverySignal) {
-        logDebug("skip inbound session_sync_delivery visible message", {
+        logDebug("skip inbound OpenClaw delivery visible message", {
+          type: sessionSyncDeliverySignal.type,
           senderId,
           toId: toIdRaw,
           targetId,
