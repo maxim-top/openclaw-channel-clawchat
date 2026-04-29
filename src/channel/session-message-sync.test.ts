@@ -4,6 +4,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
+  extractSessionMappingSignal,
   extractSessionMessageSyncSignal,
   extractSessionSyncDeliverySignal,
   removeOpenclawEdgeMention,
@@ -95,6 +96,48 @@ test("non-session sync openclaw envelopes are ignored by the sync extractor", ()
       {},
     ),
     null,
+  );
+});
+
+test("session mapping signal preserves sender user id", () => {
+  assert.deepEqual(
+    extractSessionMappingSignal(
+      {
+        type: "command",
+        ext: JSON.stringify({
+          openclaw: {
+            type: "session_mapping_sync",
+            mappings: [
+              {
+                session_key: "agent:main:subagent:child-1",
+                group_id: "session-group-1",
+                openclaw_user_id: "openclaw-user",
+                sender_user_id: "real-user",
+                parent_session_key: "agent:main:clawchat-router:group:group-1",
+                root_session_key: "agent:main:clawchat-router:group:group-1",
+              },
+            ],
+          },
+        }),
+      },
+      {},
+    ),
+    {
+      type: "session_mapping_sync",
+      openclawUserId: undefined,
+      mappings: [
+        {
+          session: "agent:main:subagent:child-1",
+          groupId: "session-group-1",
+          openclawUserId: "openclaw-user",
+          senderUserId: "real-user",
+          parentSessionKey: "agent:main:clawchat-router:group:group-1",
+          rootSessionKey: "agent:main:clawchat-router:group:group-1",
+          effectiveTargetSessionKey: undefined,
+          updatedAt: undefined,
+        },
+      ],
+    },
   );
 });
 

@@ -743,6 +743,12 @@ class ClawchatSession {
           mapping.effectiveTargetSessionKey,
         ),
       });
+      if (mapping.senderUserId?.trim()) {
+        this.rememberSessionSenderUserId({
+          sessionKey,
+          senderUserId: mapping.senderUserId,
+        });
+      }
     }
     if (signal.type === "session_mapping_snapshot") {
       void this.seedMissingSessionMappingsFromLocalStore();

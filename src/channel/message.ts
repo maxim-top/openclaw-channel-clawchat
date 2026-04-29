@@ -33,6 +33,7 @@ export type SessionMappingPayload = {
   session: string;
   groupId?: string;
   openclawUserId?: string;
+  senderUserId?: string;
   parentSessionKey?: string;
   rootSessionKey?: string;
   effectiveTargetSessionKey?: string;
@@ -238,6 +239,7 @@ function normalizeSessionMappingPayload(value: unknown): SessionMappingPayload |
     session,
     ...(groupId ? { groupId } : {}),
     openclawUserId: String(obj.openclaw_user_id ?? obj.openclawUserId ?? "").trim() || undefined,
+    senderUserId: String(obj.sender_user_id ?? obj.senderUserId ?? "").trim() || undefined,
     parentSessionKey:
       String(obj.parent_session_key ?? obj.parentSessionKey ?? "").trim() || undefined,
     rootSessionKey: String(obj.root_session_key ?? obj.rootSessionKey ?? "").trim() || undefined,
