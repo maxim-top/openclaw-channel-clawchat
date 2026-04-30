@@ -44,6 +44,7 @@ function createBaseRoute(sessionKey = "agent:main:route-session") {
 
 function createMessageFlowHarness(options?: {
   mappedSessionKey?: string | null;
+  effectiveTargetSessionKey?: string | null;
   routeSessionKey?: string;
   cfg?: OpenClawConfig;
   sessionMapSyncEnabled?: boolean;
@@ -102,7 +103,14 @@ function createMessageFlowHarness(options?: {
       seededSyncs.push(update as Record<string, unknown>);
     },
     resolveSessionMapping: () =>
-      options?.mappedSessionKey ? { sessionKey: options.mappedSessionKey } : null,
+      options?.mappedSessionKey
+        ? {
+            sessionKey: options.mappedSessionKey,
+            ...(options?.effectiveTargetSessionKey
+              ? { effectiveTargetSessionKey: options.effectiveTargetSessionKey }
+              : {}),
+          }
+        : null,
     applySessionMappingSignal: () => undefined,
     pendingGroupContext: new Map(),
     routerGroupQueueByGroupId: new Map(),
@@ -692,6 +700,34 @@ test("group inbound uses mapped subagent session when group mapping points to ch
   assert.equal(harness.routes[0]?.sessionKey, "agent:main:subagent:child-7");
   assert.equal(harness.dispatched[0]?.OriginatingTo, "group-7");
   assert.equal(harness.seededSyncs.length, 0);
+});
+
+test("group inbound uses effective target session when merge_sub_sessions remaps child session", async () => {
+  const harness = createMessageFlowHarness({
+    mappedSessionKey: "agent:main:subagent:child-7",
+    effectiveTargetSessionKey: "agent:main:clawchat:group:group-7",
+    routeSessionKey: "agent:main:clawchat:group:group-7",
+  });
+
+  await harness.flow.onInbound(
+    {
+      id: "msg-group-child-merge-1",
+      from: "sender-user",
+      to: "group-7",
+      toType: "group",
+      content: "hello after child session is merged",
+      timestamp: 67902,
+    },
+    "group",
+    createBaseAccount(),
+  );
+
+  assert.equal(harness.recorded.length, 1);
+  assert.equal(harness.dispatched.length, 1);
+  assert.equal(harness.recorded[0]?.SessionKey, "agent:main:clawchat:group:group-7");
+  assert.equal(harness.dispatched[0]?.SessionKey, "agent:main:clawchat:group:group-7");
+  assert.equal(harness.routes.length, 1);
+  assert.equal(harness.routes[0]?.sessionKey, "agent:main:clawchat:group:group-7");
 });
 
 test("direct inbound seeds the external sender user instead of the OpenClaw user", async () => {

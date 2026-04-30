@@ -730,13 +730,21 @@ class ClawchatSession {
     appId: string;
     openclawUserId: string;
     groupId: string;
-  }): { sessionKey: string } | null {
+  }): { sessionKey: string; effectiveTargetSessionKey?: string } | null {
     const key = this.buildSessionMappingGroupKey(params);
     const mapping = this.sessionMappingByGroupKey.get(key);
     if (!mapping?.sessionKey) {
       return null;
     }
-    return { sessionKey: mapping.sessionKey };
+    const normalizedSessionKey = this.normalizeSessionMappingSessionKey(mapping.sessionKey);
+    const mappingEntry = this.sessionMappingBySessionKey.get(normalizedSessionKey);
+    const effectiveTargetSessionKey = this.normalizeOptionalSessionKey(
+      mappingEntry?.effectiveTargetSessionKey,
+    );
+    return {
+      sessionKey: mapping.sessionKey,
+      ...(effectiveTargetSessionKey ? { effectiveTargetSessionKey } : {}),
+    };
   }
 
   resolveMappedOutboundGroupTarget(appId: string, rawId: string): ClawchatMessageTarget | null {

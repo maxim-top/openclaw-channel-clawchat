@@ -169,7 +169,7 @@ type MessageFlowContext = {
     appId: string;
     openclawUserId: string;
     groupId: string;
-  }) => { sessionKey: string } | null;
+  }) => { sessionKey: string; effectiveTargetSessionKey?: string } | null;
   applySessionMappingSignal: (signal: SessionMappingSignal) => void;
   pendingGroupContext: Map<string, PendingGroupContextEntry[]>;
   routerGroupQueueByGroupId: Map<string, RouterGroupQueueEntry>;
@@ -353,11 +353,14 @@ export function createClawchatSessionMessageFlow(ctx: MessageFlowContext) {
       openclawUserId,
       groupId: params.targetId,
     });
-    const mappedSessionKey = mapping?.sessionKey?.trim() || null;
+    const mappedSessionKey =
+      mapping?.effectiveTargetSessionKey?.trim() || mapping?.sessionKey?.trim() || null;
     logDebug("session mapping lookup resolved", {
       appId: params.appId,
       openclawUserId,
       groupId: params.targetId,
+      rawMappedSessionKey: mapping?.sessionKey?.trim() || undefined,
+      effectiveTargetSessionKey: mapping?.effectiveTargetSessionKey?.trim() || undefined,
       mappedSessionKey: mappedSessionKey || undefined,
       hit: Boolean(mappedSessionKey),
     });
