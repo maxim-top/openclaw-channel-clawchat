@@ -324,6 +324,37 @@ function pickNumberId(value: unknown): number | null {
   return null;
 }
 
+export function shouldSeedSessionMappingFromLocalStoreEntry(params: {
+  sessionKey: string;
+  endedAt?: unknown;
+  parentSessionKey?: unknown;
+  spawnedBy?: unknown;
+}): boolean {
+  const normalizedSessionKey = String(params.sessionKey ?? "")
+    .trim()
+    .toLowerCase();
+  if (!normalizedSessionKey) {
+    return false;
+  }
+  if (
+    normalizedSessionKey.includes(":clawchat:") ||
+    normalizedSessionKey.includes(":clawchat-router:")
+  ) {
+    return false;
+  }
+  const normalizedParentSessionKey = String(
+    params.parentSessionKey ?? params.spawnedBy ?? "",
+  )
+    .trim()
+    .toLowerCase();
+  const endedAtRaw =
+    typeof params.endedAt === "number" ? params.endedAt : Number(params.endedAt ?? 0);
+  if (normalizedParentSessionKey && Number.isFinite(endedAtRaw) && endedAtRaw > 0) {
+    return false;
+  }
+  return true;
+}
+
 // Main plugin session orchestrator.
 class ClawchatSession {
   private client: ClawchatImClient | null = null;
@@ -771,11 +802,6 @@ class ClawchatSession {
     }
   }
 
-  private isClawchatCreatedSessionKey(sessionKey: string): boolean {
-    const normalized = this.normalizeSessionMappingSessionKey(sessionKey);
-    return normalized.includes(":clawchat:") || normalized.includes(":clawchat-router:");
-  }
-
   private async listLocalSessionsForMappingSeed(): Promise<
     Array<{
       sessionKey: string;
@@ -797,13 +823,14 @@ class ClawchatSession {
           typeof sessionEntry?.spawnDepth === "number"
             ? sessionEntry.spawnDepth
             : Number(sessionEntry?.spawnDepth ?? NaN);
-        if (!normalizedSessionKey) {
-          return null;
-        }
-        if (this.isClawchatCreatedSessionKey(normalizedSessionKey)) {
-          return null;
-        }
-        if (Number.isFinite(endedAtRaw) && endedAtRaw > 0) {
+        if (
+          !shouldSeedSessionMappingFromLocalStoreEntry({
+            sessionKey,
+            endedAt: endedAtRaw,
+            parentSessionKey: sessionEntry?.parentSessionKey,
+            spawnedBy: sessionEntry?.spawnedBy,
+          })
+        ) {
           return null;
         }
         const result: {
