@@ -2,18 +2,8 @@ import { maybeParseJson } from "./utils.js";
 
 const LOG_MASK = "******";
 const SENSITIVE_KEY_PATTERN =
-  "(?:password|pass|pwd|api[_-]?key|token|secret|authorization|auth|cookie|session|private[_-]?key)";
+  "(?:password|pass|pwd|api[_-]?key|token|secret|authorization|auth|cookie|private[_-]?key)";
 const SENSITIVE_KEY_RE = new RegExp(SENSITIVE_KEY_PATTERN, "i");
-const SESSION_KEY_ALLOWLIST = new Set([
-  "session",
-  "sessionkey",
-  "sessioncount",
-  "parentsession",
-  "rootsession",
-  "parentsessionkey",
-  "rootsessionkey",
-  "effectivetargetsessionkey",
-]);
 const SENSITIVE_INLINE_RE = new RegExp(
   `((?:${SENSITIVE_KEY_PATTERN})\\s*[:=]\\s*["']?)([^"',\\s}]+)(["']?)`,
   "gi",
@@ -35,9 +25,6 @@ function normalizeLogKey(value: string): string {
 function shouldRedactKey(value: string): boolean {
   const normalized = normalizeLogKey(value);
   if (!normalized) {
-    return false;
-  }
-  if (SESSION_KEY_ALLOWLIST.has(normalized)) {
     return false;
   }
   return SENSITIVE_KEY_RE.test(value);

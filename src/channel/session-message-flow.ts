@@ -1288,7 +1288,7 @@ export function createClawchatSessionMessageFlow(ctx: MessageFlowContext) {
           }
           return;
         }
-        if (isSelfLoopback && account.allowManage && sessionMapSettingsSync) {
+        if (isSelfLoopback && sessionMapSettingsSync) {
           if (!isCommandOuterMessage(eventAny, meta)) {
             logDebug("skip loopback session_map_settings_sync: outer type is not command", {
               senderId,
@@ -1303,11 +1303,14 @@ export function createClawchatSessionMessageFlow(ctx: MessageFlowContext) {
               cfg,
               settings: sessionMapSettingsSync,
             });
-            await ctx.sendSessionMapSettingsReportToSelf(sessionMapSettingsSync);
+            if (account.allowManage) {
+              await ctx.sendSessionMapSettingsReportToSelf(sessionMapSettingsSync);
+            }
             logDebug("processed session_map_settings_sync from self loopback message", {
               senderId,
               toId: toIdRaw,
               selfId,
+              allowManage: account.allowManage,
               sessionMapSync: sessionMapSettingsSync.sessionMapSync,
               mergeSubSessions: sessionMapSettingsSync.mergeSubSessions,
             });
@@ -1317,6 +1320,7 @@ export function createClawchatSessionMessageFlow(ctx: MessageFlowContext) {
               senderId,
               toId: toIdRaw,
               selfId,
+              allowManage: account.allowManage,
               sessionMapSync: sessionMapSettingsSync.sessionMapSync,
               mergeSubSessions: sessionMapSettingsSync.mergeSubSessions,
             });

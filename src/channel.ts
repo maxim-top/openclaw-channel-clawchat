@@ -369,6 +369,8 @@ class ClawchatSession {
       effectiveTargetSessionKey?: string;
     }
   >();
+  private sessionMapSyncEnabled = false;
+  private mergeSubSessionsEnabled = false;
   private recentSubagentAssistantReplyByParentSessionKey = new Map<
     string,
     {
@@ -399,7 +401,7 @@ class ClawchatSession {
     applyOpenClawConfigPatch: (rawPatch) => this.applyOpenClawConfigPatch(rawPatch),
     handlePresetPromptSync: (params) => this.handlePresetPromptSync(params),
     handleSessionMapSettingsSync: (params) => this.handleSessionMapSettingsSync(params),
-    isSessionMapSyncEnabled: (cfg) => resolveClawchatAccount(cfg).sessionMapSync,
+    isSessionMapSyncEnabled: (cfg) => this.isSessionMapSyncEffectivelyEnabled(cfg),
     sendText: (target, text, account, ext) => this.sendText(target, text, account, ext),
     sendSessionMessageSyncToSelf: (update) => this.sendSessionMessageSyncToSelf(update),
     resolveSessionMapping: (params) => this.resolveSessionMapping(params),
@@ -422,6 +424,14 @@ class ClawchatSession {
   private normalizeOptionalSessionKey(value: unknown): string | undefined {
     const normalized = this.normalizeSessionMappingSessionKey(String(value ?? ""));
     return normalized || undefined;
+  }
+
+  private isSessionMapSyncEffectivelyEnabled(
+    cfg?: OpenClawConfig,
+    account?: ResolvedClawchatAccount,
+  ): boolean {
+    const resolvedAccount = account ?? (cfg ? resolveClawchatAccount(cfg) : this.lastConfig);
+    return Boolean(resolvedAccount?.allowManage) && this.sessionMapSyncEnabled;
   }
 
   private cleanupRecentSubagentAssistantReplies(now = Date.now()): void {
@@ -820,7 +830,7 @@ class ClawchatSession {
       .filter((session): session is NonNullable<typeof session> => Boolean(session?.sessionKey));
   }
 
-  private async seedMissingSessionMappingsFromLocalStore(): Promise<void> {
+  private async resyncLocalSessionMappingsFromLocalStore(mode: "missing" | "all"): Promise<void> {
     if (this.missingSessionMappingSeedPromise) {
       await this.missingSessionMappingSeedPromise;
       return;
@@ -832,22 +842,25 @@ class ClawchatSession {
         return;
       }
       const sessions = await this.listLocalSessionsForMappingSeed();
-      const missingSessions = sessions.filter((session) => {
+      const sessionsToSync =
+        mode === "all"
+          ? sessions
+          : sessions.filter((session) => {
         const normalized = this.normalizeSessionMappingSessionKey(session.sessionKey);
         return !this.sessionMappingBySessionKey.has(normalized);
       });
-      if (missingSessions.length === 0) {
-        logDebug("no missing local sessions to seed mapping", {
+      if (sessionsToSync.length === 0) {
+        logDebug(mode === "all" ? "no local sessions to resync mapping" : "no missing local sessions to seed mapping", {
           sessionCount: sessions.length,
         });
         return;
       }
-      logDebug("seeding missing local session mappings from snapshot", {
+      logDebug(mode === "all" ? "resyncing local session mappings after settings change" : "seeding missing local session mappings from snapshot", {
         totalLocalSessions: sessions.length,
-        missingMappings: missingSessions.length,
-        sessionKeys: missingSessions.map((session) => session.sessionKey),
+        syncMappings: sessionsToSync.length,
+        sessionKeys: sessionsToSync.map((session) => session.sessionKey),
       });
-      for (const session of missingSessions) {
+      for (const session of sessionsToSync) {
         await this.sendSessionMessageSyncToSelf({
           sessionFile: session.sessionKey,
           sessionKey: session.sessionKey,
@@ -870,6 +883,14 @@ class ClawchatSession {
         this.missingSessionMappingSeedPromise = null;
       }
     }
+  }
+
+  private async seedMissingSessionMappingsFromLocalStore(): Promise<void> {
+    await this.resyncLocalSessionMappingsFromLocalStore("missing");
+  }
+
+  private async resyncAllSessionMappingsFromLocalStore(): Promise<void> {
+    await this.resyncLocalSessionMappingsFromLocalStore("all");
   }
 
   private appendPendingGroupContext(params: {
@@ -1215,23 +1236,6 @@ class ClawchatSession {
     await this.ensureBootstrapExtraFilesConfigured(params.cfg);
   }
 
-  private buildSessionMapSettingsPatch(params: {
-    cfg: OpenClawConfig;
-    sessionMapSync: boolean;
-    mergeSubSessions: boolean;
-  }): string {
-    const account = resolveClawchatAccount(params.cfg);
-    const channelKey = account.configKey || CLAWCHAT_CHANNEL_ID;
-    return JSON.stringify({
-      channels: {
-        [channelKey]: {
-          sessionMapSync: params.sessionMapSync,
-          mergeSubSessions: params.sessionMapSync && params.mergeSubSessions,
-        },
-      },
-    });
-  }
-
   private async handleSessionMapSettingsSync(params: {
     cfg: OpenClawConfig;
     settings: {
@@ -1239,16 +1243,15 @@ class ClawchatSession {
       mergeSubSessions: boolean;
     };
   }): Promise<void> {
-    const rawPatch = this.buildSessionMapSettingsPatch({
-      cfg: params.cfg,
-      sessionMapSync: params.settings.sessionMapSync,
-      mergeSubSessions: params.settings.mergeSubSessions,
-    });
-    await this.applyOpenClawConfigPatch(rawPatch);
-    if (!params.settings.sessionMapSync) {
+    this.sessionMapSyncEnabled = params.settings.sessionMapSync;
+    this.mergeSubSessionsEnabled =
+      params.settings.sessionMapSync && params.settings.mergeSubSessions;
+    if (!this.sessionMapSyncEnabled) {
       this.sessionMappingByGroupKey.clear();
       this.sessionMappingBySessionKey.clear();
+      return;
     }
+    await this.resyncAllSessionMappingsFromLocalStore();
   }
 
   private currentConfigKey(account: ResolvedClawchatAccount): string {
@@ -1588,7 +1591,7 @@ class ClawchatSession {
     }
     const cfg = await getClawchatRuntime().config.loadConfig();
     const account = resolveClawchatAccount(cfg);
-    if (!account.allowManage || !account.sessionMapSync) {
+    if (!this.isSessionMapSyncEffectivelyEnabled(cfg, account)) {
       return;
     }
     const message = asPlainObject(update.message);
@@ -1972,7 +1975,6 @@ class ClawchatSession {
           providers?: Record<string, unknown>;
         };
       };
-      const account = resolveClawchatAccount(cfg);
       const providerInited = Boolean(
         (cfg.models?.providers?.clawchat &&
           typeof cfg.models.providers.clawchat === "object" &&
@@ -1991,8 +1993,6 @@ class ClawchatSession {
             provider_inited: providerInited,
             plugin_version: CLAWCHAT_PLUGIN_VERSION,
             api_version: CLAWCHAT_API_VERSION,
-            session_map_sync: account.sessionMapSync,
-            merge_sub_sessions: account.mergeSubSessions,
           },
         }),
       });
@@ -2074,6 +2074,11 @@ class ClawchatSession {
     mergeSubSessions: boolean;
   }): Promise<void> {
     if (!this.client || !this.selfId) {
+      return;
+    }
+    const cfg = await getClawchatRuntime().config.loadConfig();
+    const account = resolveClawchatAccount(cfg);
+    if (!account.allowManage) {
       return;
     }
     try {
@@ -2326,8 +2331,6 @@ export const clawchatPlugin: any = {
           },
         },
         defaultTo: { type: "string" },
-        sessionMapSync: { type: "boolean" },
-        mergeSubSessions: { type: "boolean" },
       },
     },
     uiHints: {
@@ -2380,16 +2383,6 @@ export const clawchatPlugin: any = {
         help: "Default outbound target when no explicit target is provided.",
         placeholder: "user:123456",
       },
-      sessionMapSync: {
-        label: "Session Map Sync",
-        help: "Enable bidirectional session_map message sync for this ClawChat node.",
-        advanced: true,
-      },
-      mergeSubSessions: {
-        label: "Merge Sub-sessions",
-        help: "When session_map sync is enabled, merge child sessions into the root mapping.",
-        advanced: true,
-      },
     },
   },
   config: {
@@ -2406,8 +2399,6 @@ export const clawchatPlugin: any = {
       groupPolicy: account.groupPolicy,
       groupAllowFromCount: account.groupAllowFrom?.length ?? 0,
       groupsCount: Object.keys(account.groups ?? {}).length,
-      sessionMapSync: account.sessionMapSync,
-      mergeSubSessions: account.mergeSubSessions,
     }),
     resolveAllowFrom: ({ cfg }: any) => resolveClawchatAccount(cfg).allowFrom,
     formatAllowFrom: ({ allowFrom }: any) =>

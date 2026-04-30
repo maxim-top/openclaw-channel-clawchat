@@ -27,8 +27,6 @@ function createBaseAccount(): ResolvedClawchatAccount {
         allowFrom: ["*"],
       },
     },
-    sessionMapSync: true,
-    mergeSubSessions: false,
   };
 }
 
@@ -48,6 +46,8 @@ function createMessageFlowHarness(options?: {
   mappedSessionKey?: string | null;
   routeSessionKey?: string;
   cfg?: OpenClawConfig;
+  sessionMapSyncEnabled?: boolean;
+  allowManage?: boolean;
 }) {
   const recorded: Array<Record<string, unknown>> = [];
   const dispatched: Array<Record<string, unknown>> = [];
@@ -61,14 +61,7 @@ function createMessageFlowHarness(options?: {
     getSelfId: () => "openclaw-user",
     updateSelfIdFromClient: () => undefined,
     getReadOnlyClient: () => null,
-    loadConfig: async () =>
-      ((options?.cfg ?? {
-        channels: {
-          clawchat: {
-            sessionMapSync: true,
-          },
-        },
-      }) as OpenClawConfig),
+    loadConfig: async () => ((options?.cfg ?? {}) as OpenClawConfig),
     resolveAgentRoute: () => createBaseRoute(options?.routeSessionKey),
     resolveStorePath: () => "/tmp/mock-sessions.json",
     readSessionUpdatedAt: () => undefined,
@@ -99,8 +92,8 @@ function createMessageFlowHarness(options?: {
     handleSessionMapSettingsSync: async (params) => {
       handledSessionMapSettingsSync.push(params as Record<string, unknown>);
     },
-    isSessionMapSyncEnabled: (cfg) =>
-      Boolean(cfg?.channels?.clawchat?.sessionMapSync || cfg?.channels?.clawchat?.session_map_sync),
+    isSessionMapSyncEnabled: () =>
+      options?.sessionMapSyncEnabled !== false && options?.allowManage !== false,
     sendText: async (target, text, _account, ext) => {
       texts.push({ target, text, ext: ext as Record<string, unknown> | undefined });
       return "msg-1";
@@ -266,13 +259,7 @@ test("group inbound uses mapped session only when session_map_sync is enabled", 
   const disabledHarness = createMessageFlowHarness({
     mappedSessionKey: "agent:main:mapped-session",
     routeSessionKey: "agent:main:route-session",
-    cfg: {
-      channels: {
-        clawchat: {
-          sessionMapSync: false,
-        },
-      },
-    } as OpenClawConfig,
+    sessionMapSyncEnabled: false,
   });
   await disabledHarness.flow.onInbound(
     {
@@ -293,13 +280,7 @@ test("group inbound uses mapped session only when session_map_sync is enabled", 
   const enabledHarness = createMessageFlowHarness({
     mappedSessionKey: "agent:main:mapped-session",
     routeSessionKey: "agent:main:route-session",
-    cfg: {
-      channels: {
-        clawchat: {
-          sessionMapSync: true,
-        },
-      },
-    } as OpenClawConfig,
+    sessionMapSyncEnabled: true,
   });
   await enabledHarness.flow.onInbound(
     {
@@ -316,6 +297,34 @@ test("group inbound uses mapped session only when session_map_sync is enabled", 
     createBaseAccount(),
   );
   assert.equal(enabledHarness.recorded[0]?.SessionKey, "agent:main:mapped-session");
+});
+
+test("group inbound does not use mapped session when allowManage is disabled", async () => {
+  const harness = createMessageFlowHarness({
+    mappedSessionKey: "agent:main:mapped-session",
+    routeSessionKey: "agent:main:route-session",
+    sessionMapSyncEnabled: true,
+    allowManage: false,
+  });
+  const account = createBaseAccount();
+  account.allowManage = false;
+
+  await harness.flow.onInbound(
+    {
+      id: "group-allow-manage-disabled-1",
+      from: "user-1",
+      to: "group-1",
+      toType: "group",
+      type: "text",
+      content: "hello",
+      config: { mentionList: [], senderNickname: "u1" },
+      timestamp: 1006,
+    },
+    "group",
+    account,
+  );
+
+  assert.equal(harness.recorded[0]?.SessionKey, "agent:main:route-session");
 });
 
 test("self loopback session_map_settings_sync command is consumed and reported", async () => {
@@ -353,6 +362,39 @@ test("self loopback session_map_settings_sync command is consumed and reported",
     sessionMapSync: true,
     mergeSubSessions: true,
   });
+  assert.equal(harness.dispatched.length, 0);
+});
+
+test("self loopback session_map_settings_sync command is consumed but not reported when allowManage is disabled", async () => {
+  const harness = createMessageFlowHarness();
+  const account = createBaseAccount();
+  account.allowManage = false;
+
+  await harness.flow.onInbound(
+    {
+      id: "settings-sync-allow-manage-disabled-1",
+      from: "openclaw-user",
+      to: "openclaw-user",
+      type: "command",
+      toType: "roster",
+      content: "",
+      ext: JSON.stringify({
+        openclaw: {
+          type: "session_map_settings_sync",
+          settings: {
+            session_map_sync: "on",
+            merge_sub_sessions: "on",
+          },
+        },
+      }),
+      timestamp: 1007,
+    },
+    "direct",
+    account,
+  );
+
+  assert.equal(harness.handledSessionMapSettingsSync.length, 1);
+  assert.equal(harness.reportedSessionMapSettings.length, 0);
   assert.equal(harness.dispatched.length, 0);
 });
 
