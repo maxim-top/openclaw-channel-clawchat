@@ -4,6 +4,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import { createClawchatSessionMessageFlow } from "./session-message-flow.js";
+import { normalizeClawchatSessionKey, resolveClawchatSessionKeyFacts } from "./message.js";
 import type { OpenClawConfig, ResolvedClawchatAccount } from "../types.js";
 
 function createBaseAccount(): ResolvedClawchatAccount {
@@ -143,6 +144,30 @@ function createSessionMessageSyncExt() {
     },
   });
 }
+
+test("session key facts canonicalize legacy keys", () => {
+  assert.equal(
+    normalizeClawchatSessionKey("agent:main:router:group:group-42"),
+    "agent:main:clawchat-router:group:group-42",
+  );
+  assert.deepEqual(resolveClawchatSessionKeyFacts("agent:main:group:group-42"), {
+    rawSessionKey: "agent:main:group:group-42",
+    canonicalSessionKey: "agent:main:clawchat:group:group-42",
+    channel: "clawchat",
+    chatType: "group",
+    targetId: "group-42",
+    isLegacyAlias: true,
+    isClawchatSession: true,
+    isRouter: false,
+    isGroup: true,
+    isDirect: false,
+    isSubagent: false,
+  });
+  assert.equal(
+    resolveClawchatSessionKeyFacts("agent:main:subagent:test-child").isSubagent,
+    true,
+  );
+});
 
 function createSessionSyncDeliveryExt() {
   return JSON.stringify({

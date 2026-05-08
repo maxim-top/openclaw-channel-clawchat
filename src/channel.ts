@@ -13,6 +13,8 @@ import {
 } from "./channel/config.js";
 import {
   collectHashCandidates,
+  normalizeClawchatSessionKey,
+  resolveClawchatSessionKeyFacts,
   type RouterReplyTargetSnapshot,
   type SessionMappingSignal,
 } from "./channel/message.js";
@@ -344,23 +346,16 @@ export function shouldSeedSessionMappingFromLocalStoreEntry(params: {
   parentSessionKey?: unknown;
   spawnedBy?: unknown;
 }): boolean {
-  const normalizedSessionKey = String(params.sessionKey ?? "")
-    .trim()
-    .toLowerCase();
+  const normalizedSessionKey = normalizeClawchatSessionKey(params.sessionKey);
   if (!normalizedSessionKey) {
     return false;
   }
-  if (
-    normalizedSessionKey.includes(":clawchat:") ||
-    normalizedSessionKey.includes(":clawchat-router:")
-  ) {
+  if (resolveClawchatSessionKeyFacts(normalizedSessionKey).isClawchatSession) {
     return false;
   }
-  const normalizedParentSessionKey = String(
+  const normalizedParentSessionKey = normalizeClawchatSessionKey(
     params.parentSessionKey ?? params.spawnedBy ?? "",
-  )
-    .trim()
-    .toLowerCase();
+  );
   const endedAtRaw =
     typeof params.endedAt === "number" ? params.endedAt : Number(params.endedAt ?? 0);
   if (normalizedParentSessionKey && Number.isFinite(endedAtRaw) && endedAtRaw > 0) {
@@ -463,17 +458,7 @@ class ClawchatSession {
   }
 
   private normalizeSessionMappingSessionKey(sessionKey: string): string {
-    const normalized = sessionKey.trim().toLowerCase();
-    if (normalized.startsWith("agent:main:router:")) {
-      return `agent:main:clawchat-router:${normalized.slice("agent:main:router:".length)}`;
-    }
-    if (normalized.startsWith("agent:main:group:") && normalized.slice("agent:main:group:".length).trim()) {
-      return `agent:main:clawchat:group:${normalized.slice("agent:main:group:".length).trim()}`;
-    }
-    if (normalized.startsWith("agent:main:") && /^\d+$/.test(normalized.slice("agent:main:".length))) {
-      return `agent:main:clawchat:direct:${normalized.slice("agent:main:".length)}`;
-    }
-    return normalized;
+    return normalizeClawchatSessionKey(sessionKey);
   }
 
   private normalizeOptionalSessionKey(value: unknown): string | undefined {
@@ -634,10 +619,7 @@ class ClawchatSession {
 
   private isGroupSessionKey(sessionKey?: string): boolean {
     const normalized = this.normalizeOptionalSessionKey(sessionKey);
-    return Boolean(
-      normalized &&
-        (normalized.includes(":clawchat:group:") || normalized.includes(":clawchat-router:group:")),
-    );
+    return Boolean(normalized && resolveClawchatSessionKeyFacts(normalized).isGroup);
   }
 
   private resolvePreferredReplySessionSyncTarget(params: {
@@ -650,11 +632,13 @@ class ClawchatSession {
     rootSessionKey?: string;
   } | null {
     const normalizedSessionKey = this.normalizeOptionalSessionKey(params.sessionKey);
+    const sessionFacts = resolveClawchatSessionKeyFacts(normalizedSessionKey);
     if (
       !normalizedSessionKey ||
       params.source !== "control_ui_reply" ||
       params.role !== "assistant" ||
-      !normalizedSessionKey.includes(":clawchat-router:direct:")
+      !sessionFacts.isRouter ||
+      !sessionFacts.isDirect
     ) {
       return null;
     }
@@ -724,21 +708,15 @@ class ClawchatSession {
     if (!normalizedSessionKey) {
       return null;
     }
+    const sessionFacts = resolveClawchatSessionKeyFacts(normalizedSessionKey);
     const entry = this.sessionMappingBySessionKey.get(normalizedSessionKey);
     const originKind = String(entry?.originKind ?? "").trim();
     const originUserId = String(entry?.originUserId ?? "").trim();
     if (!originUserId || (originKind !== "im_user" && originKind !== "direct_user")) {
       return null;
     }
-    const channel = normalizedSessionKey.includes(":clawchat-router:")
-      ? "clawchat-router"
-      : normalizedSessionKey.includes(":clawchat:")
-        ? "clawchat"
-        : undefined;
-    const chatType =
-      originKind === "direct_user" || normalizedSessionKey.includes(":direct:")
-        ? "direct"
-        : "group";
+    const channel = sessionFacts.channel;
+    const chatType = originKind === "direct_user" || sessionFacts.isDirect ? "direct" : "group";
     const toId = chatType === "group" ? entry?.groupId : originUserId;
     return {
       senderUserId: originUserId,

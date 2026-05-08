@@ -4,6 +4,7 @@ import {
   extractPresetPromptSync,
   extractSessionMapSettingsSync,
   extractRouterSignal,
+  resolveClawchatSessionKeyFacts,
   extractSessionMappingSignal,
   extractSessionSyncDeliverySignal,
   extractSessionMessageSyncSignal,
@@ -220,10 +221,7 @@ export function createClawchatSessionMessageFlow(ctx: MessageFlowContext) {
     if (!normalized || (mappedSessionKey && mappedSessionKey.trim())) {
       return false;
     }
-    return (
-      normalized.includes(":clawchat:group:") ||
-      normalized.includes(":clawchat-router:group:")
-    );
+    return resolveClawchatSessionKeyFacts(normalized).isGroup;
   }
 
   async function maybeSeedParentSessionMapping(params: {

@@ -53,6 +53,20 @@ export type SessionMappingSignal = {
   openclawUserId?: string;
 };
 
+export type SessionKeyFacts = {
+  rawSessionKey: string;
+  canonicalSessionKey: string;
+  channel?: "clawchat" | "clawchat-router";
+  chatType?: "group" | "direct";
+  targetId?: string;
+  isLegacyAlias: boolean;
+  isClawchatSession: boolean;
+  isRouter: boolean;
+  isGroup: boolean;
+  isDirect: boolean;
+  isSubagent: boolean;
+};
+
 export type SessionMessageSyncSignal = {
   type: "session_message_sync";
   session?: string;
@@ -68,6 +82,66 @@ export type SessionSyncDeliverySignal = {
   role?: string;
   messageId?: string;
 };
+
+export function normalizeClawchatSessionKey(value: unknown): string {
+  const normalized = typeof value === "string" ? value.trim().toLowerCase() : "";
+  if (normalized.startsWith("agent:main:router:")) {
+    return `agent:main:clawchat-router:${normalized.slice("agent:main:router:".length)}`;
+  }
+  if (normalized.startsWith("agent:main:group:") && normalized.slice("agent:main:group:".length).trim()) {
+    return `agent:main:clawchat:group:${normalized.slice("agent:main:group:".length).trim()}`;
+  }
+  if (normalized.startsWith("agent:main:") && /^\d+$/.test(normalized.slice("agent:main:".length))) {
+    return `agent:main:clawchat:direct:${normalized.slice("agent:main:".length)}`;
+  }
+  return normalized;
+}
+
+export function resolveClawchatSessionKeyFacts(value: unknown): SessionKeyFacts {
+  const rawSessionKey = typeof value === "string" ? value.trim().toLowerCase() : "";
+  const canonicalSessionKey = normalizeClawchatSessionKey(rawSessionKey);
+  const facts: SessionKeyFacts = {
+    rawSessionKey,
+    canonicalSessionKey,
+    isLegacyAlias: Boolean(rawSessionKey) && rawSessionKey !== canonicalSessionKey,
+    isClawchatSession: false,
+    isRouter: false,
+    isGroup: false,
+    isDirect: false,
+    isSubagent: canonicalSessionKey.includes(":subagent:"),
+  };
+  if (!canonicalSessionKey) {
+    return facts;
+  }
+  const parts = canonicalSessionKey.split(":").map((part) => part.trim()).filter(Boolean);
+  if (parts.length < 5 || parts[0] !== "agent") {
+    return facts;
+  }
+  const channel = parts[2];
+  if (channel !== "clawchat" && channel !== "clawchat-router") {
+    return facts;
+  }
+  let cursor = 3;
+  if (parts.length >= 6 && parts[3] !== "group" && parts[3] !== "direct") {
+    cursor = 4;
+  }
+  const chatType = parts[cursor];
+  if ((chatType !== "group" && chatType !== "direct") || cursor + 1 >= parts.length) {
+    return facts;
+  }
+  const targetId = parts.slice(cursor + 1).join(":").trim();
+  if (!targetId) {
+    return facts;
+  }
+  facts.channel = channel;
+  facts.chatType = chatType;
+  facts.targetId = targetId;
+  facts.isClawchatSession = true;
+  facts.isRouter = channel === "clawchat-router";
+  facts.isGroup = chatType === "group";
+  facts.isDirect = chatType === "direct";
+  return facts;
+}
 
 export function parseExtValue(value: unknown): Record<string, unknown> | null {
   if (!value) {

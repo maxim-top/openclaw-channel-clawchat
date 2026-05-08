@@ -1,5 +1,6 @@
 import { logDebug } from "../shared/logging.js";
 import { asPlainObject, pickId } from "../shared/utils.js";
+import { normalizeClawchatSessionKey } from "../channel/message.js";
 
 const GLOBAL_SESSION_LOGGER_INSTALLED = "__clawchatSessionLoggerInstalled";
 const SESSION_SYNC_DEDUPE_TTL_MS = 30_000;
@@ -80,17 +81,7 @@ function normalizeHint(value: unknown): string {
 }
 
 function normalizeSessionIdentity(value: unknown): string {
-  const normalized = typeof value === "string" ? value.trim().toLowerCase() : "";
-  if (normalized.startsWith("agent:main:router:")) {
-    return `agent:main:clawchat-router:${normalized.slice("agent:main:router:".length)}`;
-  }
-  if (normalized.startsWith("agent:main:group:") && normalized.slice("agent:main:group:".length).trim()) {
-    return `agent:main:clawchat:group:${normalized.slice("agent:main:group:".length).trim()}`;
-  }
-  if (normalized.startsWith("agent:main:") && /^\d+$/.test(normalized.slice("agent:main:".length))) {
-    return `agent:main:clawchat:direct:${normalized.slice("agent:main:".length)}`;
-  }
-  return normalized;
+  return normalizeClawchatSessionKey(value);
 }
 
 function isSupportedSyncSource(value: unknown): value is SessionMessageSyncSource {
