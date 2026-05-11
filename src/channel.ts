@@ -109,14 +109,43 @@ const meta = {
 };
 
 const require = createRequire(import.meta.url);
-const channelPackageJson = require("../package.json") as { version?: string };
-const CLAWCHAT_PLUGIN_VERSION =
-  typeof channelPackageJson?.version === "string" ? channelPackageJson.version.trim() : "";
+export function resolveClawchatPluginVersion(moduleUrl = import.meta.url): string {
+  const moduleDir = path.dirname(fileURLToPath(moduleUrl));
+  const candidatePaths = [
+    path.resolve(moduleDir, "../package.json"),
+    path.resolve(moduleDir, "../../package.json"),
+  ];
+  for (const candidatePath of candidatePaths) {
+    if (!fs.existsSync(candidatePath)) {
+      continue;
+    }
+    try {
+      const parsed = JSON.parse(fs.readFileSync(candidatePath, "utf8")) as { version?: string };
+      if (typeof parsed?.version === "string" && parsed.version.trim()) {
+        return parsed.version.trim();
+      }
+    } catch {
+      // Ignore malformed or unreadable package metadata and keep searching.
+    }
+  }
+  return "";
+}
+const CLAWCHAT_PLUGIN_VERSION = resolveClawchatPluginVersion();
 const CLAWCHAT_API_VERSION = 2;
-const sdkModulePath = path.resolve(
-  path.dirname(fileURLToPath(import.meta.url)),
-  "./lanying-im-sdk/floo-3.0.0.js",
-);
+export function resolveClawchatSdkModulePath(moduleUrl = import.meta.url): string {
+  const moduleDir = path.dirname(fileURLToPath(moduleUrl));
+  const candidatePaths = [
+    path.resolve(moduleDir, "./lanying-im-sdk/floo-3.0.0.js"),
+    path.resolve(moduleDir, "../../src/lanying-im-sdk/floo-3.0.0.js"),
+  ];
+  for (const candidatePath of candidatePaths) {
+    if (fs.existsSync(candidatePath)) {
+      return candidatePath;
+    }
+  }
+  return candidatePaths[0];
+}
+const sdkModulePath = resolveClawchatSdkModulePath();
 let cachedFlooFactory: FlooFactory | null = null;
 const READY_TIMEOUT_MS = 15_000;
 const READY_POLL_MS = 250;
