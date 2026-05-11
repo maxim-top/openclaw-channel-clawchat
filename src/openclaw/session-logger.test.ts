@@ -150,6 +150,52 @@ test("internal runtime context user turn is not forwarded to IM", async () => {
   assert.equal(harness.forwarded.length, 0);
 });
 
+test("structured inter-session subagent announce user turn is not forwarded to IM", async () => {
+  const harness = installForwardCollector();
+
+  harness.emit({
+    sessionFile: "agent:main:clawchat-router:group:group-1",
+    messageId: "internal-structured-1",
+    message: {
+      role: "user",
+      content: [
+        "OpenClaw runtime event.",
+        "This context is runtime-generated, not user-authored. Keep internal details private.",
+        "",
+        "A completed subagent task is ready for user delivery.",
+      ].join("\n"),
+      InputProvenance: {
+        kind: "inter_session",
+        sourceSessionKey: "agent:main:subagent:child-1",
+        sourceTool: "subagent_announce",
+      },
+    },
+  });
+
+  harness.dispose();
+  assert.equal(harness.forwarded.length, 0);
+});
+
+test("internal system provenance user turn is not forwarded to IM", async () => {
+  const harness = installForwardCollector();
+
+  harness.emit({
+    sessionFile: "agent:main:clawchat-router:group:group-1",
+    messageId: "internal-system-1",
+    message: {
+      role: "user",
+      content: "Gateway restart sentinel or other internal system event",
+      InputProvenance: {
+        kind: "internal_system",
+        sourceTool: "gateway_restart",
+      },
+    },
+  });
+
+  harness.dispose();
+  assert.equal(harness.forwarded.length, 0);
+});
+
 test("assistant reply after internal runtime context still forwards to IM", async () => {
   const harness = installForwardCollector();
 
@@ -181,6 +227,75 @@ test("assistant reply after internal runtime context still forwards to IM", asyn
     message: {
       role: "assistant",
       content: "为什么31比30更受欢迎？因为它总像是多带了一点惊喜！",
+    },
+  });
+
+  harness.dispose();
+  assert.deepEqual(
+    harness.forwarded.map((update) => update.source),
+    ["control_ui_reply"],
+  );
+});
+
+test("assistant reply after structured inter-session subagent announce still forwards to IM", async () => {
+  const harness = installForwardCollector();
+
+  harness.emit({
+    sessionFile: "agent:main:clawchat-router:group:group-1",
+    messageId: "internal-structured-2",
+    message: {
+      role: "user",
+      content: [
+        "OpenClaw runtime event.",
+        "This context is runtime-generated, not user-authored. Keep internal details private.",
+        "",
+        "A completed subagent task is ready for user delivery.",
+      ].join("\n"),
+      InputProvenance: {
+        kind: "inter_session",
+        sourceSessionKey: "agent:main:subagent:child-1",
+        sourceTool: "subagent_announce",
+      },
+    },
+  });
+
+  harness.emit({
+    sessionFile: "agent:main:clawchat-router:group:group-1",
+    messageId: "internal-structured-reply-2",
+    message: {
+      role: "assistant",
+      content: "这是结构化 announce 之后的用户可见回复。",
+    },
+  });
+
+  harness.dispose();
+  assert.deepEqual(
+    harness.forwarded.map((update) => update.source),
+    ["control_ui_reply"],
+  );
+});
+
+test("assistant reply after internal system provenance user turn still forwards to IM", async () => {
+  const harness = installForwardCollector();
+
+  harness.emit({
+    sessionFile: "agent:main:clawchat-router:group:group-1",
+    messageId: "internal-system-2",
+    message: {
+      role: "user",
+      content: "Gateway restart sentinel or other internal system event",
+      InputProvenance: {
+        kind: "internal_system",
+        sourceTool: "gateway_restart",
+      },
+    },
+  });
+  harness.emit({
+    sessionFile: "agent:main:clawchat-router:group:group-1",
+    messageId: "internal-system-reply-2",
+    message: {
+      role: "assistant",
+      content: "系统事件处理后的用户可见回复。",
     },
   });
 
@@ -321,6 +436,10 @@ test("normal control UI user and assistant turns both forward to IM", async () =
     harness.forwarded.map((update) => update.source),
     ["control_ui_user", "control_ui_reply"],
   );
+  assert.deepEqual(
+    harness.forwarded.map((update) => update.syncVariant),
+    [undefined, undefined],
+  );
 });
 
 for (const [name, sessionFile, originatingTo] of [
@@ -395,7 +514,7 @@ test("control UI subagent bootstrap and assistant result both forward to IM", as
   );
 });
 
-test("subagent bootstrap inherited from ClawChat inbound is not forwarded back to IM", async () => {
+test("subagent bootstrap inherited from ClawChat inbound is forwarded as special IM-origin bootstrap source", async () => {
   const harness = installForwardCollector();
 
   harness.emit({
@@ -423,7 +542,70 @@ test("subagent bootstrap inherited from ClawChat inbound is not forwarded back t
   });
 
   harness.dispose();
-  assert.equal(harness.forwarded.length, 0);
+  assert.deepEqual(
+    harness.forwarded.map((update) => update.source),
+    ["control_ui_user", "control_ui_reply"],
+  );
+  assert.deepEqual(
+    harness.forwarded.map((update) => update.syncVariant),
+    ["im_subagent_bootstrap", "im_subagent_bootstrap"],
+  );
+});
+
+test("IM-origin bootstrap variant does not leak into later control UI turns in the same child session", async () => {
+  const harness = installForwardCollector();
+
+  harness.emit({
+    sessionFile: "agent:main:subagent:child-follow-up",
+    messageId: "bootstrap-follow-up-1",
+    message: {
+      role: "user",
+      content:
+        "[Subagent Context] You are running as a subagent (depth 1/1). Results auto-announce to your requester; do not busy-poll for status.\n\n[Subagent Task]: 讲个数字14的笑话吧",
+      InputProvenance: {
+        kind: "external_user",
+        sourceChannel: "clawchat",
+        sourceTool: "clawchat_im",
+      },
+    },
+  });
+  harness.emit({
+    sessionFile: "agent:main:subagent:child-follow-up",
+    messageId: "bootstrap-follow-up-reply-1",
+    message: {
+      role: "assistant",
+      content: "这是 bootstrap 对应的第一次回复。",
+    },
+  });
+  harness.emit({
+    sessionFile: "agent:main:subagent:child-follow-up",
+    messageId: "control-follow-up-user-1",
+    message: {
+      role: "user",
+      content: "这是后续普通控制台消息",
+      provenance: {
+        sourceChannel: "webchat",
+      },
+    },
+  });
+  harness.emit({
+    sessionFile: "agent:main:subagent:child-follow-up",
+    messageId: "control-follow-up-reply-1",
+    message: {
+      role: "assistant",
+      content: "这是后续普通控制台回复。",
+    },
+  });
+
+  harness.dispose();
+  assert.deepEqual(
+    harness.forwarded.map((update) => update.source),
+    ["control_ui_user", "control_ui_reply", "control_ui_user", "control_ui_reply"],
+  );
+  assert.deepEqual(
+    harness.forwarded.map((update) => update.syncVariant),
+    ["im_subagent_bootstrap", "im_subagent_bootstrap", undefined, undefined],
+  );
 });
 
 for (const [name, sourceTool, sessionFile] of [
@@ -468,7 +650,7 @@ for (const [name, sourceTool] of [
   ["router direct", "clawchat_router"],
   ["router group", "clawchat_router"],
 ] as const) {
-  test(`ClawChat ${name} subagent bootstrap and assistant result are not forwarded back to IM`, async () => {
+  test(`ClawChat ${name} subagent bootstrap and assistant result are forwarded as IM-origin bootstrap sources`, async () => {
     const harness = installForwardCollector();
 
     harness.emit({
@@ -495,6 +677,13 @@ for (const [name, sourceTool] of [
     });
 
     harness.dispose();
-    assert.equal(harness.forwarded.length, 0);
+    assert.deepEqual(
+      harness.forwarded.map((update) => update.source),
+      ["control_ui_user", "control_ui_reply"],
+    );
+    assert.deepEqual(
+      harness.forwarded.map((update) => update.syncVariant),
+      ["im_subagent_bootstrap", "im_subagent_bootstrap"],
+    );
   });
 }

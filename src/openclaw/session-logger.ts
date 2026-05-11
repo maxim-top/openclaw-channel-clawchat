@@ -9,6 +9,14 @@ const FORWARDED_USER_TURN_TTL_MS = 60_000;
 const RECENT_UPDATES_LIMIT = 20;
 const BODY_PREVIEW_MAX = 200;
 const CLAWCHAT_CHANNEL_IDS = new Set(["clawchat", "clawchat-router", "lanying"]);
+const INTERNAL_RUNTIME_CONTEXT_BEGIN = "<<<BEGIN_OPENCLAW_INTERNAL_CONTEXT>>>";
+const INTERNAL_RUNTIME_CONTEXT_END = "<<<END_OPENCLAW_INTERNAL_CONTEXT>>>";
+const OPENCLAW_RUNTIME_CONTEXT_NOTICE =
+  "This context is runtime-generated, not user-authored. Keep internal details private.";
+const OPENCLAW_NEXT_TURN_RUNTIME_CONTEXT_HEADER =
+  "OpenClaw runtime context for the immediately preceding user message.";
+const OPENCLAW_RUNTIME_EVENT_HEADER = "OpenClaw runtime event.";
+const OPENCLAW_RUNTIME_CONTEXT_CUSTOM_TYPE = "openclaw.runtime-context";
 const LEADING_TIMESTAMP_PREFIX_RE = /^\[[A-Za-z]{3} \d{4}-\d{2}-\d{2} \d{2}:\d{2}[^\]]*\] */;
 const INBOUND_META_SENTINELS = [
   "Conversation info (untrusted metadata):",
@@ -26,6 +34,7 @@ export type SessionMessageSyncSource =
   | "im_inbound_reply";
 
 type RememberedSessionSource = "control_ui" | "im_inbound";
+type SessionSyncVariant = "im_subagent_bootstrap";
 
 type SessionTranscriptUpdate = {
   sessionFile: string;
@@ -33,6 +42,7 @@ type SessionTranscriptUpdate = {
   message?: unknown;
   messageId?: string;
   source?: SessionMessageSyncSource;
+  syncVariant?: SessionSyncVariant;
   observedMessageType?: string;
   observedMessageTypeSource?: string;
 };
@@ -42,6 +52,7 @@ type SessionLoggerSnapshot = {
   sessionKey: string;
   messageId?: string;
   source?: SessionMessageSyncSource;
+  syncVariant?: SessionSyncVariant;
   role?: string;
   bodyPreview?: string;
 };
@@ -52,6 +63,7 @@ type SessionLoggerInstallOptions = {
 
 const recentUpdateKeys = new Map<string, number>();
 const recentSessionSources = new Map<string, { source: RememberedSessionSource; seenAt: number }>();
+const recentSessionSyncVariants = new Map<string, { variant: SessionSyncVariant; seenAt: number }>();
 const recentForwardedControlUiUsers = new Map<
   string,
   { normalizedText: string; seenAt: number; messageId?: string }
@@ -67,6 +79,11 @@ function cleanupRecentState(now = Date.now()): void {
   for (const [key, entry] of recentSessionSources.entries()) {
     if (now - entry.seenAt > SESSION_SOURCE_TTL_MS) {
       recentSessionSources.delete(key);
+    }
+  }
+  for (const [key, entry] of recentSessionSyncVariants.entries()) {
+    if (now - entry.seenAt > SESSION_SOURCE_TTL_MS) {
+      recentSessionSyncVariants.delete(key);
     }
   }
   for (const [key, entry] of recentForwardedControlUiUsers.entries()) {
@@ -91,6 +108,10 @@ function isSupportedSyncSource(value: unknown): value is SessionMessageSyncSourc
     value === "im_inbound_user" ||
     value === "im_inbound_reply"
   );
+}
+
+function isSupportedSyncVariant(value: unknown): value is SessionSyncVariant {
+  return value === "im_subagent_bootstrap";
 }
 
 function resolveSessionIdentity(update: SessionTranscriptUpdate): string {
@@ -126,6 +147,18 @@ function extractMessageSyncSource(message: Record<string, unknown> | null): Sess
   );
 }
 
+function extractSyncVariant(value: unknown): SessionSyncVariant | null {
+  return isSupportedSyncVariant(value) ? value : null;
+}
+
+function extractMessageSyncVariant(message: Record<string, unknown> | null): SessionSyncVariant | null {
+  if (!message) {
+    return null;
+  }
+  const openclawMeta = asPlainObject(message.__openclaw);
+  return extractSyncVariant(message.syncVariant) || extractSyncVariant(openclawMeta?.syncVariant);
+}
+
 function rememberSessionSource(
   sessionIdentity: string,
   source: RememberedSessionSource | null,
@@ -152,6 +185,37 @@ function resolveRememberedSessionSource(
   remembered.seenAt = now;
   recentSessionSources.set(sessionIdentity, remembered);
   return remembered.source;
+}
+
+function rememberSessionSyncVariant(
+  sessionIdentity: string,
+  variant: SessionSyncVariant | null,
+  now = Date.now(),
+): void {
+  if (!sessionIdentity) {
+    return;
+  }
+  if (!variant) {
+    recentSessionSyncVariants.delete(sessionIdentity);
+    return;
+  }
+  recentSessionSyncVariants.set(sessionIdentity, { variant, seenAt: now });
+}
+
+function consumeRememberedSessionSyncVariant(
+  sessionIdentity: string,
+  now = Date.now(),
+): SessionSyncVariant | null {
+  if (!sessionIdentity) {
+    return null;
+  }
+  cleanupRecentState(now);
+  const remembered = recentSessionSyncVariants.get(sessionIdentity);
+  if (!remembered) {
+    return null;
+  }
+  recentSessionSyncVariants.delete(sessionIdentity);
+  return remembered.variant;
 }
 
 function messageLooksLikeClawchatInbound(message: Record<string, unknown> | null): boolean {
@@ -188,6 +252,12 @@ function resolveCurrentMessageUserSyncSource(
     if (sourceChannel === "webchat") {
       return "control_ui_user";
     }
+    if (
+      isSubagentBootstrapUserTurn(sessionIdentity, message) &&
+      (hasClawchatChannelHint(sourceChannel) || sourceTool.includes("clawchat") || sourceTool.includes("lanying"))
+    ) {
+      return "control_ui_user";
+    }
     if (hasClawchatChannelHint(sourceChannel) || sourceTool.includes("clawchat") || sourceTool.includes("lanying")) {
       return "im_inbound_user";
     }
@@ -196,6 +266,37 @@ function resolveCurrentMessageUserSyncSource(
         return "control_ui_user";
       }
       return null;
+    }
+  }
+  return null;
+}
+
+function resolveCurrentMessageSyncVariant(
+  sessionIdentity: string,
+  message: Record<string, unknown> | null,
+): SessionSyncVariant | null {
+  if (!message) {
+    return null;
+  }
+  const explicitVariant = extractMessageSyncVariant(message);
+  if (explicitVariant) {
+    return explicitVariant;
+  }
+  const provenanceCandidates = [
+    asPlainObject(message.provenance),
+    asPlainObject(message.InputProvenance),
+  ];
+  for (const provenance of provenanceCandidates) {
+    if (!provenance) {
+      continue;
+    }
+    const sourceChannel = normalizeHint(provenance.sourceChannel);
+    const sourceTool = normalizeHint(provenance.sourceTool);
+    if (
+      isSubagentBootstrapUserTurn(sessionIdentity, message) &&
+      (hasClawchatChannelHint(sourceChannel) || sourceTool.includes("clawchat") || sourceTool.includes("lanying"))
+    ) {
+      return "im_subagent_bootstrap";
     }
   }
   return null;
@@ -253,19 +354,84 @@ function isSubagentBootstrapUserTurn(
   const normalizedText = visibleText.trim();
   return (
     normalizedText.includes("[Subagent Task]:") ||
-    normalizedText.startsWith("[Subagent Context] You are running as a subagent")
+    normalizedText.startsWith("[Subagent Context] You are running as a subagent") ||
+    normalizedText.startsWith(
+      "[Subagent Context] This subagent session is persistent and remains available for thread follow-up messages.",
+    ) ||
+    normalizedText.includes(
+      "Begin. Your assigned task is in the system prompt under **Your Role**; execute it to completion.",
+    ) ||
+    normalizedText.includes(
+      "Begin. Your assigned task is in the system prompt under Your Role; execute it to completion.",
+    )
   );
+}
+
+function hasStructuredInterSessionSubagentAnnounce(
+  message: Record<string, unknown> | null,
+): boolean {
+  if (!message) {
+    return false;
+  }
+  const provenanceCandidates = [
+    asPlainObject(message.provenance),
+    asPlainObject(message.InputProvenance),
+  ];
+  for (const provenance of provenanceCandidates) {
+    if (
+      normalizeHint(provenance?.kind) === "inter_session" &&
+      normalizeHint(provenance?.sourceTool) === "subagent_announce"
+    ) {
+      return true;
+    }
+  }
+  return false;
+}
+
+function hasInternalSystemProvenance(message: Record<string, unknown> | null): boolean {
+  if (!message) {
+    return false;
+  }
+  const provenanceCandidates = [
+    asPlainObject(message.provenance),
+    asPlainObject(message.InputProvenance),
+  ];
+  for (const provenance of provenanceCandidates) {
+    if (normalizeHint(provenance?.kind) === "internal_system") {
+      return true;
+    }
+  }
+  return false;
 }
 
 function isInternalRuntimeContextUserTurn(message: Record<string, unknown> | null): boolean {
   if (!message) {
     return false;
   }
+  if (hasStructuredInterSessionSubagentAnnounce(message)) {
+    return true;
+  }
+  if (hasInternalSystemProvenance(message)) {
+    return true;
+  }
   const visibleText = extractMessageVisibleText(message.content);
   if (!visibleText) {
     return false;
   }
   const normalizedText = visibleText.trim();
+  if (
+    normalizedText.includes(INTERNAL_RUNTIME_CONTEXT_BEGIN) ||
+    normalizedText.includes(INTERNAL_RUNTIME_CONTEXT_END)
+  ) {
+    return true;
+  }
+  if (
+    normalizedText.includes(`${OPENCLAW_NEXT_TURN_RUNTIME_CONTEXT_HEADER}\n${OPENCLAW_RUNTIME_CONTEXT_NOTICE}`) ||
+    normalizedText.includes(`${OPENCLAW_RUNTIME_EVENT_HEADER}\n${OPENCLAW_RUNTIME_CONTEXT_NOTICE}`) ||
+    normalizedText.includes(OPENCLAW_RUNTIME_CONTEXT_CUSTOM_TYPE)
+  ) {
+    return true;
+  }
   const hasRuntimeHeader = normalizedText.includes("OpenClaw runtime context (internal):");
   const hasPrivateNotice = normalizedText.includes("Keep internal details private.");
   const hasInternalTaskEvent = normalizedText.includes("[Internal task completion event]");
@@ -459,10 +625,7 @@ function resolveUpdateSyncSource(update: SessionTranscriptUpdate): SessionMessag
   const message = asPlainObject(update.message);
   const explicitSource = extractSyncSource(update.source) || extractMessageSyncSource(message);
   if (explicitSource) {
-    rememberSessionSource(
-      sessionIdentity,
-      explicitSource.startsWith("control_ui") ? "control_ui" : "im_inbound",
-    );
+    rememberSessionSource(sessionIdentity, explicitSource.startsWith("control_ui") ? "control_ui" : "im_inbound");
     return explicitSource;
   }
   const role = normalizeHint(message?.role ?? message?.authorRole);
@@ -558,6 +721,7 @@ function rememberSnapshot(update: SessionTranscriptUpdate): void {
     sessionKey: resolveSessionIdentity(update),
     messageId: update.messageId,
     source: resolveUpdateSyncSource(update) ?? undefined,
+    syncVariant: extractSyncVariant(update.syncVariant) ?? undefined,
     role: normalizeHint(message?.role ?? message?.authorRole) || undefined,
     bodyPreview: extractBodyPreview(update.message) || undefined,
   });
@@ -578,6 +742,7 @@ export function formatGlobalOpenClawSessionLoggerStatus(): string {
         `session=${snapshot.sessionKey}`,
         snapshot.messageId ? `messageId=${snapshot.messageId}` : "",
         snapshot.source ? `source=${snapshot.source}` : "",
+        snapshot.syncVariant ? `syncVariant=${snapshot.syncVariant}` : "",
         snapshot.role ? `role=${snapshot.role}` : "",
         snapshot.bodyPreview ? `body="${snapshot.bodyPreview}"` : "",
       ]
@@ -591,6 +756,7 @@ export function formatGlobalOpenClawSessionLoggerStatus(): string {
 export function resetGlobalOpenClawSessionLoggerStatus(): string {
   recentUpdateKeys.clear();
   recentSessionSources.clear();
+  recentSessionSyncVariants.clear();
   recentForwardedControlUiUsers.clear();
   recentSnapshots.length = 0;
   return "ClawChat session sync status reset.";
@@ -633,6 +799,20 @@ export function installGlobalOpenClawSessionLogger(
       });
     }
     const source = resolveUpdateSyncSource(update);
+    const role = normalizeHint(message?.role ?? message?.authorRole);
+    const currentMessageSyncVariant = resolveCurrentMessageSyncVariant(sessionIdentity, message);
+    const syncVariant =
+      extractSyncVariant(update.syncVariant) ||
+      extractMessageSyncVariant(message) ||
+      (role === "assistant"
+        ? consumeRememberedSessionSyncVariant(sessionIdentity)
+        : currentMessageSyncVariant);
+    if (role === "user" || role === "assistant") {
+      rememberSessionSyncVariant(
+        sessionIdentity,
+        role === "user" ? currentMessageSyncVariant : extractSyncVariant(update.syncVariant),
+      );
+    }
     if (!shouldProcessUpdate(update)) {
       return;
     }
@@ -641,17 +821,21 @@ export function installGlobalOpenClawSessionLogger(
           ...update,
           sessionKey: sessionIdentity,
           source,
+          ...(syncVariant ? { syncVariant } : {}),
           ...(source === "control_ui_user" ? { observedMessageType: "control_ui_user" } : {}),
           ...(source === "control_ui_reply" ? { observedMessageType: "control_ui_reply" } : {}),
           ...(source === "im_inbound_user" ? { observedMessageType: "im_inbound_user" } : {}),
           ...(source === "im_inbound_reply" ? { observedMessageType: "im_inbound_reply" } : {}),
-          ...(normalizeHint(message?.role ?? message?.authorRole) === "user"
+          ...(role === "user"
             ? {
-                observedMessageTypeSource: resolveCurrentMessageUserSyncSourceBasis(
-                  resolveSessionIdentity(update),
-                  message,
-                  source,
-                ) ?? undefined,
+                observedMessageTypeSource:
+                  syncVariant === "im_subagent_bootstrap"
+                    ? "fallback"
+                    : resolveCurrentMessageUserSyncSourceBasis(
+                        resolveSessionIdentity(update),
+                        message,
+                        source,
+                      ) ?? undefined,
               }
             : {}),
         }

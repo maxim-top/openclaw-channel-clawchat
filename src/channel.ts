@@ -425,6 +425,7 @@ class ClawchatSession {
   private routerGroupQueueByGroupId = new Map<string, { tail: Promise<void>; pending: number }>();
   private routerReplySeq = 0;
   private sessionMappingByGroupKey = new Map<string, { sessionKey: string; updatedAt: number }>();
+  private recentSessionSyncVariantBySessionKey = new Map<string, string>();
   private sessionMappingBySessionKey = new Map<
     string,
     {
@@ -555,6 +556,32 @@ class ClawchatSession {
       updatedAt: Date.now(),
     });
     return { childSessionKey: previous.childSessionKey };
+  }
+
+  private rememberSessionSyncVariant(sessionKey: string, syncVariant?: string): void {
+    const normalizedSessionKey = this.normalizeOptionalSessionKey(sessionKey);
+    const normalizedSyncVariant = typeof syncVariant === "string" ? syncVariant.trim() : "";
+    if (!normalizedSessionKey) {
+      return;
+    }
+    if (!normalizedSyncVariant) {
+      this.recentSessionSyncVariantBySessionKey.delete(normalizedSessionKey);
+      return;
+    }
+    this.recentSessionSyncVariantBySessionKey.set(normalizedSessionKey, normalizedSyncVariant);
+  }
+
+  private consumeRememberedSessionSyncVariant(sessionKey: string): string | undefined {
+    const normalizedSessionKey = this.normalizeOptionalSessionKey(sessionKey);
+    if (!normalizedSessionKey) {
+      return undefined;
+    }
+    const remembered = this.recentSessionSyncVariantBySessionKey.get(normalizedSessionKey);
+    if (!remembered) {
+      return undefined;
+    }
+    this.recentSessionSyncVariantBySessionKey.delete(normalizedSessionKey);
+    return remembered;
   }
 
   private buildLocalSessionStorePath(cfg: OpenClawConfig): string {
@@ -1635,6 +1662,7 @@ class ClawchatSession {
     message?: unknown;
     messageId?: string;
     source?: string;
+    syncVariant?: string;
     parentSessionKey?: string;
     rootSessionKey?: string;
     spawnDepth?: number;
@@ -1714,6 +1742,10 @@ class ClawchatSession {
       });
     }
     const normalizedSource = typeof update.source === "string" ? update.source.trim() : undefined;
+    const normalizedSyncVariant =
+      typeof update.syncVariant === "string" && update.syncVariant.trim()
+        ? update.syncVariant.trim()
+        : undefined;
     const normalizedRole = typeof role === "string" ? role.trim().toLowerCase() : "";
     if (normalizedSource === "control_ui_reply" && normalizedRole === "assistant") {
       const parentSuppression = this.shouldSuppressParentAssistantReplyAfterSubagent({
@@ -1734,10 +1766,10 @@ class ClawchatSession {
     }
     const inheritedObservedOriginFacts =
       payloadSessionKey.includes(":subagent:") &&
-      normalizedSource === "control_ui_user" &&
       normalizedRole === "user" &&
       !update.senderUserId?.trim() &&
       !update.observedSenderUserId?.trim() &&
+      normalizedSource === "control_ui_user" &&
       update.observedMessageType === "control_ui_user" &&
       update.observedMessageTypeSource === "fallback"
         ? this.resolveObservedOriginFactsFromSessionMapping(payloadLineage.parentSessionKey) ??
@@ -1792,6 +1824,30 @@ class ClawchatSession {
             update.observedMessageTypeSource.trim()
           ? update.observedMessageTypeSource.trim()
           : undefined;
+    const inheritedSyncVariant =
+      !normalizedSyncVariant &&
+      payloadSessionKey.includes(":subagent:") &&
+      normalizedRole === "user" &&
+      normalizedSource === "control_ui_user" &&
+      observedMessageTypeSource === "inherited_mapping" &&
+      observedMessageType === "im_inbound_user" &&
+      extractSessionSyncText(content).includes("[Subagent Context]")
+        ? "im_subagent_bootstrap"
+        : undefined;
+    const rememberedSyncVariant =
+      !normalizedSyncVariant &&
+      !inheritedSyncVariant &&
+      normalizedSource === "control_ui_reply" &&
+      normalizedRole === "assistant"
+        ? this.consumeRememberedSessionSyncVariant(payloadSessionKey)
+        : undefined;
+    const effectiveSyncVariant =
+      normalizedSyncVariant ?? inheritedSyncVariant ?? rememberedSyncVariant;
+    if (normalizedSource === "control_ui_user" && normalizedRole === "user") {
+      this.rememberSessionSyncVariant(payloadSessionKey, effectiveSyncVariant);
+    } else if (normalizedSource === "control_ui_user") {
+      this.rememberSessionSyncVariant(payloadSessionKey, undefined);
+    }
     const normalizedPayload = {
       session: payloadSessionKey,
       ...(typeof update.messageId === "string" && update.messageId.trim()
@@ -1808,6 +1864,7 @@ class ClawchatSession {
           ? { spawn_depth: payloadLineage.spawnDepth }
           : {}),
       ...(normalizedSource ? { source: normalizedSource } : {}),
+      ...(effectiveSyncVariant ? { sync_variant: effectiveSyncVariant } : {}),
       ...(legacySenderUserId
         ? { sender_user_id: legacySenderUserId }
         : {}),
@@ -2326,6 +2383,7 @@ export async function emitSessionMessageSyncToSelf(update: {
   message?: unknown;
   messageId?: string;
   source?: string;
+  syncVariant?: string;
   senderUserId?: string;
   observedSenderUserId?: string;
   observedFromUserId?: string;
