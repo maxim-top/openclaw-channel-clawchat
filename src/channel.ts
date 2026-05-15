@@ -1831,6 +1831,7 @@ class ClawchatSession {
             source: "control_ui_reply",
             role: "assistant",
             message_id: messageId,
+            visible_delivery_owner: "plugin",
             ...(requestMsgId ? { trigger_msg_id: requestMsgId, request_msg_id: requestMsgId } : {}),
           },
           ai: {
@@ -2822,6 +2823,7 @@ export const clawchatPlugin: any = {
           type: "im_reply_delivery",
           source: "im_reply",
           role: "assistant",
+          visible_delivery_owner: "plugin",
         },
         ai: {
           role: "ai",

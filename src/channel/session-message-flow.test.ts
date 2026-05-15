@@ -694,6 +694,7 @@ test("group mapped session inbound preserves origin for execution while sanitizi
   assert.equal(sentExt?.openclaw?.type, "session_sync_delivery");
   assert.equal(sentExt?.openclaw?.source, "control_ui_reply");
   assert.equal(sentExt?.openclaw?.role, "assistant");
+  assert.equal(sentExt?.openclaw?.visible_delivery_owner, "plugin");
   assert.equal(sentExt?.ai?.role, "ai");
   assert.equal(sentExt?.ai?.ai_generate, false);
 });
@@ -819,6 +820,7 @@ test("direct router replies still self-loop via router_reply instead of plain ou
   assert.equal(replyExt?.openclaw?.source, "control_ui_reply");
   assert.equal(replyExt?.openclaw?.role, "assistant");
   assert.equal(replyExt?.openclaw?.session, "agent:main:route-session");
+  assert.equal(replyExt?.openclaw?.visible_delivery_owner, "plugin");
   assert.equal(replyExt?.ai?.role, "ai");
   assert.equal(replyExt?.ai?.ai_generate, false);
 });

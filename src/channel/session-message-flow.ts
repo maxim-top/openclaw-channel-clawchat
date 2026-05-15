@@ -566,6 +566,7 @@ export function createClawchatSessionMessageFlow(ctx: MessageFlowContext) {
               session: persistedSessionKey,
               source: "control_ui_reply",
               role: "assistant",
+              visible_delivery_owner: "plugin",
               request_sid: params.messageId || undefined,
             },
             ai: {
@@ -1073,6 +1074,7 @@ export function createClawchatSessionMessageFlow(ctx: MessageFlowContext) {
                 role: "assistant",
                 message_id: `router_reply_${now}_${replySeq}`,
                 router_request_sid: replyTargetSnapshot.requestSid,
+                visible_delivery_owner: "plugin",
               },
               ai: {
                 role: "ai",
