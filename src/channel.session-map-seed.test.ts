@@ -69,7 +69,7 @@ test("router group delivery session falls back to router session without mapping
   assert.equal(sessionKey, "agent:main:clawchat-router:group:group-1");
 });
 
-test("root ClawChat assistant replies remain plugin-owned visible deliveries", () => {
+test("root ClawChat assistant replies without plugin delivery fact stay connector-owned", () => {
   const ownership = resolveTranscriptVisibleDeliveryOwnership({
     sessionKey: "agent:main:clawchat-router:group:group-1",
     source: "control_ui_reply",
@@ -77,8 +77,21 @@ test("root ClawChat assistant replies remain plugin-owned visible deliveries", (
     rootSessionKey: "agent:main:clawchat-router:group:group-1",
   });
 
+  assert.equal(ownership.owner, "connector");
+  assert.equal(ownership.reason, "transcript_sync");
+});
+
+test("root ClawChat assistant replies with plugin delivery fact are plugin-owned", () => {
+  const ownership = resolveTranscriptVisibleDeliveryOwnership({
+    sessionKey: "agent:main:clawchat-router:group:group-1",
+    source: "control_ui_reply",
+    role: "assistant",
+    rootSessionKey: "agent:main:clawchat-router:group:group-1",
+    hasPluginVisibleDeliveryFact: true,
+  });
+
   assert.equal(ownership.owner, "plugin");
-  assert.equal(ownership.reason, "normal_channel_reply");
+  assert.equal(ownership.reason, "plugin_visible_delivery");
 });
 
 test("subagent assistant transcript with matching plugin delivery fact is plugin-owned", () => {

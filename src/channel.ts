@@ -433,21 +433,8 @@ export function resolveTranscriptVisibleDeliveryOwnership(params: {
   rootSessionKey?: string;
   hasPluginVisibleDeliveryFact?: boolean;
 }): { owner: "plugin" | "connector"; reason: string } {
-  const normalizedSessionKey = normalizeClawchatSessionKey(params.sessionKey);
-  const sessionFacts = resolveClawchatSessionKeyFacts(normalizedSessionKey);
-  const isRootSession =
-    (!params.parentSessionKey || params.parentSessionKey === sessionFacts.canonicalSessionKey) &&
-    (!params.rootSessionKey || params.rootSessionKey === sessionFacts.canonicalSessionKey);
   const isAssistantReply =
     params.source === "control_ui_reply" && params.role === "assistant";
-  if (
-    isAssistantReply &&
-    sessionFacts.isClawchatSession &&
-    !sessionFacts.isSubagent &&
-    isRootSession
-  ) {
-    return { owner: "plugin", reason: "normal_channel_reply" };
-  }
   if (isAssistantReply && params.hasPluginVisibleDeliveryFact) {
     return { owner: "plugin", reason: "plugin_visible_delivery" };
   }
